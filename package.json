@@ -14,6 +14,9 @@
     "migration:down": "bun scripts/migrate.ts down"
   },
   "dependencies": {
+    "@mikro-orm/core": "6.6.17",
+    "@mikro-orm/migrations": "6.6.17",
+    "@mikro-orm/postgresql": "6.6.17",
     "@nestjs/common": "12.2.0",
     "@nestjs/core": "12.2.0",
     "@nestjs/platform-express": "12.2.0",
