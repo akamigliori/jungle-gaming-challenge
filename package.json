@@ -14,13 +14,18 @@
     "migration:down": "bun scripts/migrate.ts down"
   },
   "dependencies": {
+    "@aws-sdk/client-sqs": "3.1147.0",
     "@mikro-orm/core": "6.6.17",
     "@mikro-orm/migrations": "6.6.17",
+    "@mikro-orm/nestjs": "6.1.2",
     "@mikro-orm/postgresql": "6.6.17",
     "@nestjs/common": "12.2.0",
     "@nestjs/core": "12.2.0",
     "@nestjs/platform-express": "12.2.0",
     "decimal.js": "10.6.0",
+    "nestjs-pino": "5.3.1",
+    "pino": "10.4.0",
+    "pino-http": "11.0.0",
     "reflect-metadata": "0.2.2",
     "rxjs": "7.8.2",
     "zod": "4.6.7"
