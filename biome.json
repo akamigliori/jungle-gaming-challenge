@@ -28,12 +28,16 @@
         "src/infrastructure/**",
         "src/interfaces/**",
         "src/app.module.ts",
-        "src/main.ts"
+        "src/main.ts",
+        "src/app.ts"
       ],
       "linter": {
         "rules": {
           "style": {
             "useImportType": "off"
+          },
+          "complexity": {
+            "noStaticOnlyClass": "off"
           }
         }
       }

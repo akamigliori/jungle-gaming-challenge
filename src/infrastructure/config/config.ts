@@ -59,3 +59,6 @@ export function loadConfig(env: Env = process.env): AppConfig {
     logLevel: e.LOG_LEVEL,
   };
 }
+
+/** Token de injeção da configuração já validada. */
+export const APP_CONFIG = Symbol('APP_CONFIG');
