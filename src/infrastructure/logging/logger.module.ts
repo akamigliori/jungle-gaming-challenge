@@ -35,9 +35,10 @@ export function createLoggerModule(cfg: AppConfig): DynamicModule {
   return LoggerModule.forRoot({
     pinoHttp: {
       level: cfg.logLevel,
-      redact: ['req.headers.authorization', 'req.body'],
-      genReqId: correlationIdFor,
-      customAttributeKeys: { reqId: 'correlationId' },
+      redact: ['req.headers.authorization', 'req.headers.cookie', 'req.body'],
+      genReqId: (req, res) => correlationIdFor(req, res),
+      // `correlationId` no topo de toda linha de log emitida durante a requisição
+      customProps: (req) => ({ correlationId: req.id }),
     },
   });
 }
