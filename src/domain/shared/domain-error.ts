@@ -21,7 +21,7 @@ export class InvalidPayloadError extends DomainError {
   readonly code = 'INVALID_PAYLOAD' as const;
 }
 
-/** Programming error (broken invariant), not a business error. Maps to HTTP 500. */
+/** Erro de programação (invariante quebrada), não um erro de negócio. Mapeia para HTTP 500. */
 export class InvariantViolationError extends Error {
   constructor(message: string) {
     super(message);

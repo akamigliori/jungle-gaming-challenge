@@ -14,7 +14,7 @@ export interface WagerPayload {
   referenceExternalTransactionId?: string;
 }
 
-/** JSON with keys sorted recursively; undefined object properties are dropped. */
+/** JSON com as chaves ordenadas recursivamente; propriedades de objeto com valor undefined são descartadas. */
 export function canonicalJson(value: unknown): string {
   return JSON.stringify(sortKeys(value));
 }
@@ -32,7 +32,7 @@ function sortKeys(value: unknown): unknown {
   return value;
 }
 
-/** Normalizes money first, so "25.5" and "25.50" are the same payload. Invalid money throws. */
+/** Normaliza o valor monetário antes, para que "25.5" e "25.50" sejam o mesmo payload. Valor monetário inválido lança erro. */
 export function computePayloadHash(p: WagerPayload): string {
   return createHash('sha256')
     .update(canonicalJson({ ...p, money: Money.from(p.money).toJSON() }))

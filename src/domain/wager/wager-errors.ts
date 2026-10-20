@@ -1,6 +1,6 @@
 import { DomainError, InvariantViolationError } from '../shared/domain-error';
 
-/** Programming error: a transition that the state machine does not allow. */
+/** Erro de programação: uma transição que a máquina de estados não permite. */
 export class InvalidTransactionStateError extends InvariantViolationError {}
 
 export class ReferenceRequiredError extends DomainError {

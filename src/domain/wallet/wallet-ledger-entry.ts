@@ -16,7 +16,7 @@ export interface LedgerEntryState {
 
 export type CreateLedgerEntryProps = LedgerEntryState;
 
-/** Immutable, append-only record of one balance movement. */
+/** Registro imutável e somente de inserção de uma movimentação de saldo. */
 export class WalletLedgerEntry {
   readonly id: string;
   readonly walletId: string;
@@ -60,7 +60,7 @@ export class WalletLedgerEntry {
     return entry;
   }
 
-  /** Rebuilds a persisted entry as-is, without validation. */
+  /** Reconstrói um lançamento persistido como está, sem validar. */
   static rehydrate(s: LedgerEntryState): WalletLedgerEntry {
     return new WalletLedgerEntry(s);
   }

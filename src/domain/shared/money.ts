@@ -5,7 +5,7 @@ const MoneyDecimal = Decimal.clone({ precision: 40, rounding: Decimal.ROUND_HALF
 
 const AMOUNT_PATTERN = /^\d+(\.\d{1,2})?$/;
 const CURRENCY_PATTERN = /^[A-Z]{3}$/;
-/** Fits NUMERIC(20,2): 18 integer digits + 2 decimals. */
+/** Cabe em NUMERIC(20,2): 18 dígitos inteiros + 2 casas decimais. */
 const MAX_INTEGER_DIGITS = 18;
 const SCALE = 2;
 

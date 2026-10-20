@@ -12,7 +12,7 @@ import { WagerTransactionStatus } from './wager-transaction-status';
 
 const S = WagerTransactionStatus;
 
-/** Valid transitions. PROCESSED, REJECTED and FAILED are terminal. */
+/** Transições válidas. PROCESSED, REJECTED e FAILED são estados terminais. */
 const ALLOWED: Record<WagerTransactionStatus, WagerTransactionStatus[]> = {
   [S.Pending]: [S.Processed, S.Rejected, S.Failed, S.PendingReference],
   [S.PendingReference]: [S.Processed, S.Rejected, S.Failed],
@@ -33,7 +33,7 @@ export interface CreateWagerTransactionProps {
   gameId: string;
   kind: WagerTransactionKind;
   money: Money;
-  /** Id at the provider, not the internal id. */
+  /** Id no provedor, não o id interno. */
   referenceExternalTransactionId?: string;
   createdAt: Date;
 }
@@ -90,7 +90,7 @@ export class WagerTransaction {
     this._walletVersionAfter = s.walletVersionAfter;
   }
 
-  /** Starts in PENDING. Validates the reference requirement per kind. */
+  /** Começa em PENDING. Valida a exigência de referência por tipo. */
   static create(p: CreateWagerTransactionProps): WagerTransaction {
     if (p.kind === WagerTransactionKind.Opening) {
       throw new InvariantViolationError('OPENING transactions are internal; use opening()');
@@ -111,7 +111,7 @@ export class WagerTransaction {
     return new WagerTransaction({ ...p, status: S.Pending });
   }
 
-  /** Internal wallet opening credit. The caller computes the hash (domain has no crypto). */
+  /** Crédito interno de abertura da carteira. O chamador calcula o hash (o domínio não tem criptografia). */
   static opening(p: {
     id: string;
     walletId: string;
@@ -137,7 +137,7 @@ export class WagerTransaction {
     });
   }
 
-  /** Rebuilds a persisted transaction as-is, without validation. */
+  /** Reconstrói uma transação persistida como está, sem validar. */
   static rehydrate(s: WagerTransactionState): WagerTransaction {
     return new WagerTransaction(s);
   }
@@ -205,7 +205,7 @@ export class WagerTransaction {
     return ALLOWED[this._status].length === 0;
   }
 
-  /** LOSS is recorded but never moves money. */
+  /** LOSS é registrado, mas nunca movimenta dinheiro. */
   affectsBalance(): boolean {
     return this.kind !== WagerTransactionKind.Loss;
   }

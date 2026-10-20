@@ -48,8 +48,8 @@ export class Wallet {
       throw new InvariantViolationError('initial balance must not be negative');
     }
     const currency = p.initialBalance.currency;
-    // Version 0 is a private bootstrap state: the opening credit (or the explicit
-    // bump below) makes version 1 the wallet's first observable state.
+    // A versão 0 é um estado interno de bootstrap: o crédito de abertura (ou o incremento explícito
+    // abaixo) torna a versão 1 o primeiro estado observável da carteira.
     const wallet = new Wallet({
       id: p.id,
       playerId: p.playerId,
@@ -72,7 +72,7 @@ export class Wallet {
     return { wallet, openingEntry };
   }
 
-  /** Rebuilds a persisted wallet as-is, without validation. */
+  /** Reconstrói uma carteira persistida como está, sem validar. */
   static rehydrate(s: WalletState): Wallet {
     return new Wallet(s);
   }
@@ -105,7 +105,7 @@ export class Wallet {
     return this.apply(LedgerDirection.Credit, input);
   }
 
-  /** Builds the entry first so that a failing creation leaves the wallet untouched. */
+  /** Constrói o lançamento primeiro, para que uma criação com falha deixe a carteira intacta. */
   private apply(direction: LedgerDirection, input: MovementInput): WalletLedgerEntry {
     const balanceAfter =
       direction === LedgerDirection.Credit
