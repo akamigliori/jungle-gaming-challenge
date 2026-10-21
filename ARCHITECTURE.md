@@ -29,7 +29,9 @@ src/
 ```
 
 - A dependência aponta sempre para dentro: `interfaces` → `application` → `domain`;
-  `infrastructure` implementa as portas da `application`.
+  `infrastructure` implementa as portas da `application`. As camadas externas (`interfaces` e
+  `infrastructure`) podem se referenciar para composição e leituras (health check, consulta do
+  ledger no `GET`), mas o núcleo (`domain` e `application`) nunca importa nenhuma delas.
 - Entidades de domínio têm construtor privado, fábricas estáticas e estado privado; `rehydrate`
   reconstrói a partir do banco sem revalidar.
 - Entidades de domínio e de persistência são classes separadas: o mapeamento do MikroORM usa
@@ -107,7 +109,10 @@ parser do corpo mantêm o status original com código `INVALID_PAYLOAD` (ex.: co
   vez, por `REFUND` ou por `ROLLBACK`. Isso impede que a mesma `BET` receba `REFUND` e `ROLLBACK`
   (crédito em dobro). Desfazer um `REFUND` continua possível com um `ROLLBACK` do próprio
   `REFUND`. Garantido por índice único parcial em `wager_transactions`; a segunda reversão recebe
-  `ALREADY_REVERSED`.
+  `ALREADY_REVERSED`. Como `NULL`s são distintos num índice único, o CHECK
+  `wager_tx_reversal_resolved_ck` exige que todo `REFUND`/`ROLLBACK` `PROCESSED` tenha
+  `reference_transaction_id` preenchido; sem ele, uma reversão sem referência resolvida escaparia
+  do índice.
 - **`WIN` e `LOSS` podem referenciar uma `BET`** (é comum o provedor apontar a aposta da rodada);
   `REFUND`/`ROLLBACK` exigem referência; `BET` e `OPENING` não aceitam.
 - **Nunca arredondar silenciosamente.** Valores com mais de 2 casas decimais são rejeitados
@@ -181,3 +186,18 @@ na mensagem passa pelas mesmas validações de domínio.
   nos testes para limpar o banco; em produção o usuário da aplicação não deve ter permissão de
   `TRUNCATE`.
 - Autenticação ainda não implementada (ver seção 8).
+- `@mikro-orm/nestjs` 6.1.2 declara peer dependencies para Nest `^10 || ^11`, e o projeto roda
+  Nest 12. A integração funciona e é coberta pelos testes de integração; se uma versão futura
+  quebrar, a alternativa é registrar à mão um provider de `MikroORM` (`MikroORM.init` +
+  `orm.close()` no shutdown), sem o módulo.
+
+## 11. Próximos passos
+
+- **Reservar o provider id `internal`**, usado pela transação `OPENING`: a validação de entrada
+  das transações de provedor deve rejeitá-lo, para que nenhum provedor externo colida com as
+  transações internas.
+- **Ordem determinística no publisher da outbox**: publicar por agregado em ordem
+  `(occurred_at, id)`, já que eventos da mesma transação compartilham o mesmo `occurred_at`.
+- **Revisitar `403` vs `401`** quando a autenticação real estiver ativa: hoje o filtro de erros
+  traduz ambos para o código `UNAUTHORIZED`. O desejado é token inválido ou ausente → `401`, e
+  token válido de um provedor diferente do `providerId` do corpo → `403`, com código próprio.
