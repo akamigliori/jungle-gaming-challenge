@@ -8,6 +8,7 @@
     "start": "bun src/main.ts",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
+    "check:money": "bun scripts/check-money.ts",
     "test": "bun test test/unit",
     "test:integration": "bun test test/integration --timeout 30000",
     "migration:up": "bun scripts/migrate.ts up",

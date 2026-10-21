@@ -34,12 +34,19 @@ usado pelos testes de integração. Se o volume já existia antes, crie-o à mã
 | `bun run start` | sobe a API |
 | `bun run typecheck` | checagem de tipos (`tsc --noEmit`) |
 | `bun run lint` | lint e formatação (Biome) |
+| `bun run check:money` | falha se o código usar `parseFloat`, `parseInt`, `Number()` ou `toFixed` fora das exceções listadas no script (dinheiro nunca é `number`) |
 | `bun run test` | testes unitários (`test/unit`, sem Docker) |
 | `bun run test:integration` | testes de integração (`test/integration`, Postgres e LocalStack reais) |
 | `bun run migration:up` | aplica as migrations pendentes |
 | `bun run migration:down` | reverte a última migration |
 
 Use `bun run test`, e não `bun test` puro: este último também executaria os testes de integração.
+
+## CI
+
+O GitHub Actions (`.github/workflows/ci.yml`) roda em todo pull request e em todo push para
+`develop` e `main`: typecheck, lint, `check:money`, testes unitários e, com o Postgres e o
+LocalStack do `docker-compose.yml`, os testes de integração.
 
 ## Testes de integração
 
