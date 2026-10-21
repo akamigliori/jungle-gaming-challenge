@@ -37,7 +37,7 @@ function toRecord(tx: WagerTransaction): WagerTransactionRecord {
     status: tx.status,
     failureCode: tx.failureCode ?? null,
     referenceAttempts: 0,
-    nextReferenceAttemptAt: null,
+    nextReferenceAttemptAt: tx.nextReferenceAttemptAt ?? null,
     balanceAfter: tx.balanceAfter?.toJSON().amount ?? null,
     walletVersionAfter: tx.walletVersionAfter ?? null,
     processedAt: tx.processedAt ?? null,
