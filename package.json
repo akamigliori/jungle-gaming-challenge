@@ -32,6 +32,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",
+    "@nestjs/testing": "12.2.0",
     "@types/bun": "1.4.3",
     "typescript": "7.0.2"
   }
