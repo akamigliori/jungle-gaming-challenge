@@ -23,7 +23,7 @@ Princípios:
 ```
 src/
   domain/          regras de negócio puras (sem framework, ORM, validação externa ou node:*)
-  application/     casos de uso e portas (IdGenerator, Clock, hash do payload)
+  application/     casos de uso e portas (repositórios, TransactionRunner, IdGenerator, Clock)
   infrastructure/  adaptadores: config, MikroORM, SQS, logs, auth, ids, relógio
   interfaces/      entrada HTTP: controllers, filtro de erros, mapeamento de status
 ```
@@ -32,6 +32,9 @@ src/
   `infrastructure` implementa as portas da `application`.
 - Entidades de domínio têm construtor privado, fábricas estáticas e estado privado; `rehydrate`
   reconstrói a partir do banco sem revalidar.
+- Entidades de domínio e de persistência são classes separadas: o mapeamento do MikroORM usa
+  `EntitySchema` sobre interfaces `*Record` em `infrastructure/persistence/schemas`, e cada
+  repositório converte record ↔ domínio (`Money.from` sobre as strings `NUMERIC`).
 - O `AppModule` compõe um `InfrastructureModule` global, que recebe a configuração já validada.
   Isso permite subir a aplicação nos testes com variáveis diferentes sem alterar `process.env`.
 
@@ -93,8 +96,9 @@ Corpo de erro uniforme:
 
 `retryable` é `true` só para `SERVICE_UNAVAILABLE`. O filtro global (`HttpErrorFilter`) nunca
 devolve stack trace: erros `5xx` são logados com o erro completo, `4xx` são logados sem o corpo
-da requisição. JSON malformado e erros de validação viram `400 INVALID_PAYLOAD`; falha de conexão
-com o banco vira `503`.
+da requisição. JSON malformado e erros de validação viram `400 INVALID_PAYLOAD`; demais erros do
+parser do corpo mantêm o status original com código `INVALID_PAYLOAD` (ex.: corpo grande demais →
+`413`); falha de conexão com o banco vira `503`.
 
 ## 6. Interpretações de regra adotadas
 
@@ -116,7 +120,33 @@ com o banco vira `503`.
   entre instâncias.
 - **Eventos publicados em `wagering-events.fifo`**, a partir da outbox transacional.
 
-## 7. Autenticação
+## 7. Persistência e criação de wallet
+
+- **Uma transação SQL por caso de uso.** A porta `TransactionRunner` abre a transação no
+  `EntityManager` global (`em.transactional`); o MikroORM propaga o contexto por
+  AsyncLocalStorage, então os repositórios participam dela sem receber a transação por parâmetro.
+  Se qualquer passo lança erro, tudo é desfeito (rollback).
+- **Escritas explícitas com `em.insert`.** Cada repositório executa o `INSERT` na hora, em vez de
+  acumular mudanças para um `flush` no fim. A ordem dos comandos fica explícita no caso de uso
+  (wallet → transação → ledger → outbox), as violações de constraint aparecem no ponto exato em
+  que acontecem e não há unit of work implícito para depurar.
+- **`POST /wallets`**: numa única transação, insere a wallet e, se o saldo inicial for positivo, a
+  transação interna `OPENING` já `PROCESSED`, o lançamento `CREDIT` (versão 1) e os eventos
+  `WagerTransactionProcessed` e `WalletBalanceChanged` na outbox. Saldo zero grava só a wallet
+  (versão 1). O `payloadHash` da `OPENING` usa o mesmo algoritmo das transações de provedor, com
+  `providerId = 'internal'`, `externalTransactionId = walletId`, `roundId = 'opening'` e
+  `gameId = 'internal'`.
+- **Wallet duplicada** (mesmo `playerId` e moeda) é detectada pela constraint
+  `wallets_player_currency_uq`, nunca por um `SELECT` prévio: com requisições simultâneas, o
+  segundo `INSERT` espera o primeiro terminar e recebe a violação de unicidade, traduzida em
+  `409 WALLET_ALREADY_EXISTS`. Um `SELECT` antes do `INSERT` teria uma janela de corrida entre
+  as instâncias.
+- **Ledger paginado por `wallet_version`**: `GET /wallets/:walletId/ledger` lê direto do banco
+  (sem passar pelo agregado), em ordem crescente de versão. O cursor é o base64url da última versão
+  devolvida; a consulta busca `limit + 1` linhas para saber se há próxima página. Como a versão é
+  única e crescente por wallet, novos lançamentos nunca deslocam as páginas já lidas.
+
+## 8. Autenticação
 
 Hoje não há autenticação: o `AuthGuard` global é um no-op que libera todas as requisições. Ele é o
 ponto de extensão explícito para integrar um IdP externo, junto com o contrato
@@ -134,7 +164,7 @@ Os endpoints de health (`/health/live`, `/health/ready`) são marcados com `@Pub
 abertos. Mensagens da fila são tratadas como canal interno confiável, mas a identidade do provedor
 na mensagem passa pelas mesmas validações de domínio.
 
-## 8. Observabilidade e health checks
+## 9. Observabilidade e health checks
 
 - Logs JSON (pino) com uma linha por requisição. O header `x-correlation-id` é aceito (se for um
   valor curto e seguro) ou gerado como UUIDv7, devolvido na resposta e incluído como
@@ -145,9 +175,9 @@ na mensagem passa pelas mesmas validações de domínio.
   verificação com timeout de 2 s; `503` indicando qual dependência está `down`. O cliente SQS não
   faz retry interno e tem timeout de conexão e de requisição, para não travar a verificação.
 
-## 9. Limitações conhecidas
+## 10. Limitações conhecidas
 
 - `TRUNCATE` não dispara os triggers de linha que tornam o ledger append-only. Ele é usado apenas
   nos testes para limpar o banco; em produção o usuário da aplicação não deve ter permissão de
   `TRUNCATE`.
-- Autenticação ainda não implementada (ver seção 7).
+- Autenticação ainda não implementada (ver seção 8).
