@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+
+      - name: Instala dependências
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Guarda de dinheiro
+        run: bun run check:money
+
+      - name: Testes unitários
+        run: bun run test
+
+      # Postgres e LocalStack reais, os mesmos do ambiente local; --wait espera os healthchecks
+      # (no LocalStack, até as filas estarem criadas).
+      - name: Sobe Postgres e LocalStack
+        run: docker compose up -d --wait postgres localstack
+
+      - name: Testes de integração
+        run: bun run test:integration
+
+      - name: Logs dos containers
+        if: failure()
+        run: docker compose logs
