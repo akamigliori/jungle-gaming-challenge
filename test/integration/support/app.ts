@@ -17,15 +17,16 @@ export type OverrideProviders = (builder: TestingModuleBuilder) => TestingModule
 /**
  * Sobe a aplicação real numa porta livre, apontando para o banco `wagering_test`.
  * `overrides` troca variáveis de ambiente sem alterar `process.env`; `overrideProviders`
- * troca providers do container de DI. Logs ficam silenciosos, a menos que `LOG_LEVEL` seja definido.
+ * troca providers do container de DI. Logs ficam silenciosos, a menos que `TEST_LOG_LEVEL` seja
+ * definido (o `LOG_LEVEL` do `.env` é ignorado aqui).
  */
 export async function createTestApp(
   overrides: Partial<Env> = {},
   overrideProviders?: OverrideProviders,
 ): Promise<TestApp> {
   const config = loadConfig({
-    LOG_LEVEL: 'silent',
     ...process.env,
+    LOG_LEVEL: process.env.TEST_LOG_LEVEL ?? 'silent',
     DB_NAME: process.env.TEST_DB_NAME ?? 'wagering_test',
     ...overrides,
   });

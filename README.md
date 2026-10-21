@@ -45,7 +45,8 @@ Use `bun run test`, e não `bun test` puro: este último também executaria os t
 
 Precisam do `docker compose up -d --wait` em execução: usam o Postgres e o LocalStack reais (sem
 mocks), no banco `wagering_test`, e aplicam as migrations sozinhos. Cada teste limpa as tabelas
-antes de rodar. Para ver os logs da aplicação durante os testes, defina `LOG_LEVEL=info`.
+antes de rodar. Os logs da aplicação ficam silenciosos durante os testes, mesmo com `LOG_LEVEL` no `.env`; para
+vê-los, defina `TEST_LOG_LEVEL` (ex.: `TEST_LOG_LEVEL=info bun run test:integration`).
 
 ## Variáveis de ambiente
 
@@ -59,6 +60,7 @@ antes de rodar. Para ver os logs da aplicação durante os testes, defina `LOG_L
 | `DB_PASSWORD` | `wagering` | senha do Postgres |
 | `DB_NAME` | `wagering` | banco da aplicação |
 | `TEST_DB_NAME` | `wagering_test` | banco usado pelos testes de integração |
+| `TEST_LOG_LEVEL` | `silent` | nível de log da aplicação nos testes de integração |
 | `SQS_ENDPOINT` | `http://localhost:4566` | endpoint do SQS (LocalStack) |
 | `AWS_REGION` | `us-east-1` | região AWS |
 | `AWS_ACCESS_KEY_ID` | `test` | credencial AWS (LocalStack aceita qualquer valor) |
