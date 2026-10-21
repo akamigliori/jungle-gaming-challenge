@@ -12,6 +12,11 @@ import { WagerTransactionStatus } from './wager-transaction-status';
 
 const S = WagerTransactionStatus;
 
+/** Valores fixos da transação interna de abertura (também entram no hash do payload). */
+export const OPENING_PROVIDER_ID = 'internal';
+export const OPENING_ROUND_ID = 'opening';
+export const OPENING_GAME_ID = 'internal';
+
 /** Transições válidas. PROCESSED, REJECTED e FAILED são estados terminais. */
 const ALLOWED: Record<WagerTransactionStatus, WagerTransactionStatus[]> = {
   [S.Pending]: [S.Processed, S.Rejected, S.Failed, S.PendingReference],
@@ -122,14 +127,14 @@ export class WagerTransaction {
   }): WagerTransaction {
     return new WagerTransaction({
       id: p.id,
-      providerId: 'internal',
+      providerId: OPENING_PROVIDER_ID,
       externalTransactionId: p.walletId,
       idempotencyKey: `opening:${p.walletId}`,
       payloadHash: p.payloadHash,
       walletId: p.walletId,
       playerId: p.playerId,
-      roundId: 'opening',
-      gameId: 'internal',
+      roundId: OPENING_ROUND_ID,
+      gameId: OPENING_GAME_ID,
       kind: WagerTransactionKind.Opening,
       money: p.money,
       createdAt: p.at,
