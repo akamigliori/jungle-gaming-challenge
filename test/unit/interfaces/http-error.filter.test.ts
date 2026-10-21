@@ -67,6 +67,34 @@ describe('HttpErrorFilter', () => {
     expect((c.body as { error: { code: string } }).error.code).toBe('INVALID_PAYLOAD');
   });
 
+  /** Erro no formato do pacote `http-errors`, usado pelo body-parser do Express. */
+  const bodyParserError = (message: string, status: number, type: string) =>
+    Object.assign(new Error(message), { status, statusCode: status, expose: true, type });
+
+  test.each([
+    ['request entity too large', 413, 'entity.too.large'],
+    ['unsupported content encoding "bogus"', 415, 'encoding.unsupported'],
+    ['request aborted', 400, 'request.aborted'],
+  ])('body-parser error %p → %i INVALID_PAYLOAD', (message, status, type) => {
+    const c = run(bodyParserError(message, status, type));
+    expect(c.status).toBe(status);
+    expect(c.body).toEqual({ error: { code: 'INVALID_PAYLOAD', message, retryable: false } });
+  });
+
+  test('raw SyntaxError with status 400 (body-parser) → 400 INVALID_PAYLOAD', () => {
+    const err = Object.assign(new SyntaxError('Unexpected end of JSON input'), {
+      status: 400,
+      expose: true,
+    });
+    expect(run(err).status).toBe(400);
+    expect((run(err).body as { error: { code: string } }).error.code).toBe('INVALID_PAYLOAD');
+  });
+
+  test('error with 5xx or non-exposed status stays 500', () => {
+    expect(run(Object.assign(new Error('x'), { status: 503, expose: false })).status).toBe(500);
+    expect(run(Object.assign(new Error('x'), { status: 400 })).status).toBe(500);
+  });
+
   test('NotFoundException → 404 NOT_FOUND', () => {
     const c = run(new NotFoundException('Cannot GET /nope'));
     expect(c.status).toBe(404);

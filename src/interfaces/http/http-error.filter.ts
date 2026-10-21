@@ -82,6 +82,13 @@ export class HttpErrorFilter implements ExceptionFilter {
     if (exception instanceof HttpException) {
       return this.fromHttpException(exception);
     }
+    const clientStatus = exposedClientErrorStatus(exception);
+    if (clientStatus !== null) {
+      // erro do body-parser (corpo grande demais, encoding inválido, JSON malformado que não
+      // chegou como HttpException): payload inválido, preservando o status original
+      const message = (exception as Error).message;
+      return { status: clientStatus, code: 'INVALID_PAYLOAD', message, retryable: false };
+    }
     return this.fromCode('INTERNAL_ERROR', 'Internal server error');
   }
 
@@ -106,6 +113,17 @@ function zodMessage(error: ZodError): string {
   return error.issues
     .map((i) => (i.path.length ? `${i.path.join('.')}: ${i.message}` : i.message))
     .join('; ');
+}
+
+/**
+ * Status 4xx de erros no formato do pacote `http-errors` (usado pelo body-parser do Express),
+ * só quando o próprio erro declara `expose: true`, isto é, que a mensagem é segura para o cliente.
+ */
+function exposedClientErrorStatus(exception: unknown): number | null {
+  if (!(exception instanceof Error)) return null;
+  const { status, expose } = exception as { status?: unknown; expose?: unknown };
+  const isClientError = typeof status === 'number' && status >= 400 && status < 500;
+  return isClientError && expose === true ? status : null;
 }
 
 function isConnectionError(exception: unknown): boolean {

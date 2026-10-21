@@ -280,6 +280,13 @@ describe('POST /wallets', () => {
     });
   });
 
+  test('body above the size limit → 413 INVALID_PAYLOAD', async () => {
+    const res = await post<ErrorBody>('/wallets', { playerId: 'x'.repeat(200_000) });
+
+    expect(res.status).toBe(413);
+    expect(res.body.error).toMatchObject({ code: 'INVALID_PAYLOAD', retryable: false });
+  });
+
   test.each([
     ['playerId not uuid', { playerId: 'abc', initialBalance: { amount: '1.00', currency: 'BRL' } }],
     ['missing initialBalance', { playerId: PLAYER_ID }],
