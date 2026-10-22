@@ -495,9 +495,9 @@ valor menor na inicialização.
 O `main.ts` arma, no `SIGTERM`/`SIGINT`, um timer de saída forçada de `SHUTDOWN_TIMEOUT_MS` + 5 s
 (`process.exit(1)`), para que um hook travado nunca deixe o processo pendurado. Com os valores
 padrão, o total fica abaixo dos 30 s que um orquestrador costuma esperar antes do `SIGKILL`; em
-geral, o prazo do orquestrador precisa ser maior que `SHUTDOWN_TIMEOUT_MS` + 5 s. Num `SIGKILL` nada disso roda: o
-Postgres desfaz a transação ao perder a conexão e as mensagens voltam depois do visibility timeout,
-sem efeito duplicado por causa da inbox e da idempotência.
+geral, o prazo do orquestrador precisa ser maior que `SHUTDOWN_TIMEOUT_MS` + 5 s. Num `SIGKILL`
+nada disso roda: o Postgres desfaz a transação ao perder a conexão e as mensagens voltam depois do
+visibility timeout, sem efeito duplicado por causa da inbox e da idempotência.
 
 **Paralelismo × pool.** Cada mensagem em processamento ocupa uma conexão durante a sua transação.
 Com os valores padrão, uma instância processa no máximo 2 laços × 4 mensagens = 8 transações do
@@ -527,8 +527,8 @@ primeira entrega; a mesma aposta por HTTP e por SQS; a ordem FIFO descrita acima
 se resolve na 3ª entrega, sem DLQ; erro inesperado na DLQ como `INTERNAL_ERROR`, recebido
 exatamente 3 vezes; instância que morre entre `COMMIT` e ack (outra instância confirma, sem segundo
 efeito); shutdown no meio de uma mensagem (ela termina e é confirmada; a não iniciada do mesmo
-grupo volta visível na hora e é processada por uma instância nova); e shutdown com um long poll
-aberto (a mensagem enviada durante o desligamento continua visível, sem entrega fantasma).
+grupo volta visível na hora e é processada por uma instância nova); e mensagem recebida pelo long
+poll durante o desligamento (volta visível sem ser processada e uma instância nova a processa).
 
 ## 13. Autenticação
 
@@ -583,15 +583,16 @@ na mensagem passa pelas mesmas validações de domínio.
   Nest 12. A integração funciona e é coberta pelos testes de integração; se uma versão futura
   quebrar, a alternativa é registrar à mão um provider de `MikroORM` (`MikroORM.init` +
   `orm.close()` no shutdown), sem o módulo.
-- **Contador de entregas compartilhado no grupo.** Mensagens devolvidas sem processar (atrás de
-  uma que falhou no mesmo grupo, ou não iniciadas num desligamento) também têm o
-  `ApproximateReceiveCount` incrementado. Se a da frente esgotar as entregas, as de trás podem ir
-  para a DLQ pelo redrive sem nunca terem falhado. Devolver a DLQ para a fila principal é seguro:
-  a inbox e a idempotência impedem efeito duplicado. Essas entregas sem processamento também
-  contam para o limite do erro inesperado: uma mensagem atrás de uma que falha pode chegar à
-  primeira tentativa real já com 3 ou mais entregas (um único erro inesperado a manda para a DLQ
-  como `INTERNAL_ERROR`), e o backoff de um transitório dela começa mais alto. Contar as falhas
-  reais no banco resolveria, com mais schema e lógica para um caso raro.
+- **Contador de entregas compartilhado no grupo.** Mensagens devolvidas sem processar (atrás de uma
+  que falhou no mesmo grupo, ou não iniciadas num desligamento) também têm o
+  `ApproximateReceiveCount` incrementado; num desligamento, outro laço com long poll ainda aberto
+  pode recebê-la e devolvê-la de novo, até uma entrega a mais por laço. Se a da frente esgotar as
+  entregas, as de trás podem ir para a DLQ pelo redrive sem nunca terem falhado. Devolver a DLQ para
+  a fila principal é seguro: a inbox e a idempotência impedem efeito duplicado. Essas entregas sem
+  processamento também contam para o limite do erro inesperado: uma mensagem atrás de uma que falha
+  pode chegar à primeira tentativa real já com 3 ou mais entregas (um único erro inesperado a manda
+  para a DLQ como `INTERNAL_ERROR`), e o backoff de um transitório dela começa mais alto. Contar as
+  falhas reais no banco resolveria, com mais schema e lógica para um caso raro.
 - **Duplicata na DLQ fora da janela de 5 min.** Se o processo morrer entre o envio para a DLQ e o
   ack na fila principal, e a mensagem voltar depois da janela de deduplicação do SQS, ela aparece
   duas vezes na DLQ. Reprocessá-la continua seguro pela inbox e pela idempotência.
