@@ -15,9 +15,11 @@ async function bootstrap(): Promise<void> {
   let shuttingDown = false;
 
   /**
-   * Os sinais são tratados aqui, e não pelo `enableShutdownHooks` do Nest, porque ele reenvia o
-   * sinal ao terminar e o processo sairia com 143 mesmo num desligamento limpo. `app.close()` roda
-   * os mesmos hooks (consumer, workers, HTTP, pool do Postgres, cliente SQS) e o processo sai com 0.
+   * Os sinais são tratados aqui, e não pelo `enableShutdownHooks` do Nest: no padrão ele reenvia o
+   * sinal ao terminar e o processo sairia com 143 mesmo num desligamento limpo. A opção
+   * `useProcessExit` dele sai com 0, mas não arma o timer de saída forçada; um só handler faz as
+   * duas coisas. `app.close()` roda os mesmos hooks (consumer, workers, HTTP, pool do Postgres,
+   * cliente SQS) e o processo sai com 0.
    */
   const shutdown = (): void => {
     // um segundo sinal durante o desligamento não inicia outro `close`
