@@ -8,4 +8,5 @@ export const noopMetrics: Metrics = {
   messageDeadLettered: () => undefined,
   lockConflict: () => undefined,
   processingTimed: () => undefined,
+  reconciliationChecked: () => undefined,
 };

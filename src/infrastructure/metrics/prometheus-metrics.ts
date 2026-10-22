@@ -4,6 +4,7 @@ import type {
   Metrics,
   ProcessingChannel,
   ProcessingOutcome,
+  ReconciliationResult,
   RetryOperation,
   TransactionRecord,
 } from '../../application/ports/metrics';
@@ -63,6 +64,18 @@ export class PrometheusMetrics implements Metrics {
     registers: [this.registry],
   });
 
+  private readonly reconciliations = new Counter({
+    name: 'wagering_reconciliations_total',
+    help: 'Wallet reconciliations run, by result.',
+    labelNames: ['result'],
+    registers: [this.registry],
+  });
+  private readonly reconciliationDivergences = new Counter({
+    name: 'wagering_reconciliation_divergences_total',
+    help: 'Reconciliations that found the wallet balance diverging from its ledger.',
+    registers: [this.registry],
+  });
+
   /** Leitura em andamento: coletas simultâneas ou lentas reaproveitam a mesma consulta. */
   private inFlight: Promise<OutboxBacklog> | undefined;
 
@@ -111,6 +124,11 @@ export class PrometheusMetrics implements Metrics {
 
   processingTimed(channel: ProcessingChannel, outcome: ProcessingOutcome, seconds: number): void {
     this.duration.observe({ channel, outcome }, seconds);
+  }
+
+  reconciliationChecked(result: ReconciliationResult): void {
+    this.reconciliations.inc({ result });
+    if (result === 'divergent') this.reconciliationDivergences.inc();
   }
 
   /** Texto no formato de exposição do Prometheus; os gauges da outbox são lidos agora. */
