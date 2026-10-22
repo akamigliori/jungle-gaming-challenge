@@ -123,6 +123,7 @@ vê-los, defina `TEST_LOG_LEVEL` (ex.: `TEST_LOG_LEVEL=info bun run test:integra
 | `GET /providers/:providerId/wagering/transactions/:externalTransactionId` | consulta uma transação pelo id do provedor → `200`, `404 NOT_FOUND` |
 | `GET /health/live` | processo vivo |
 | `GET /health/ready` | Postgres e filas SQS alcançáveis (`503` se alguma dependência cair) |
+| `GET /metrics` | métricas Prometheus desta instância (texto), sem autenticação; o Prometheus coleta cada instância e agrega |
 
 Exemplo:
 

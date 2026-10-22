@@ -683,7 +683,7 @@ Desenho planejado (Keycloak, OIDC):
 - o `ProviderIdentityPort` extrai o `providerId` das claims, e o caso de uso exige que ele seja
   igual ao `providerId` do corpo.
 
-Os endpoints de health (`/health/live`, `/health/ready`) são marcados com `@Public()` e continuam
+Os endpoints de health (`/health/live`, `/health/ready`) e `/metrics` são marcados com `@Public()` e continuam
 abertos. Mensagens da fila são tratadas como canal interno confiável, mas a identidade do provedor
 na mensagem passa pelas mesmas validações de domínio.
 
@@ -709,6 +709,30 @@ na mensagem passa pelas mesmas validações de domínio.
 - **O que nunca vai para o log:** valores monetários (`money`, saldos), o corpo da requisição ou
   da mensagem, o conteúdo dos eventos da outbox, `authorization` e cookies. Há testes de integração
   que afirmam a ausência do valor e do corpo na saída real do pino, para HTTP e SQS.
+- `GET /metrics` (público, como o health): métricas Prometheus desta instância, em texto. Usam
+  `prom-client` com registry próprio, mais as métricas padrão do processo. Os casos de uso e o
+  consumer dependem só da porta `Metrics` (`application/ports/metrics.ts`); o adaptador
+  `PrometheusMetrics` fica em `infrastructure/metrics/`. Rótulos vêm sempre de conjuntos fechados
+  (canal, tipo, status, código de erro, SQLSTATE): nunca `walletId`, `transactionId` nem provedor.
+
+  | Métrica | Rótulos | Pergunta que responde |
+  |---|---|---|
+  | `wagering_transactions_total` | `channel` (`http`, `sqs`, `worker`), `kind`, `status`, `failure_code` (só em `REJECTED`) | Quantas transações novas chegaram a cada estado, por onde, e por que as rejeitadas foram rejeitadas? |
+  | `wagering_duplicates_total` | `type` (`idempotency_replay`, `idempotency_conflict`, `inbox_redelivery`, `inbox_conflict`) | Quantas repetições e conflitos de chave ou de `messageId` o sistema absorveu? |
+  | `wagering_retries_total` | `operation` (`use_case_transient`, `sqs_visibility`, `outbox_publish`, `reference_reschedule`) | Onde o sistema está refazendo trabalho: transações em erro transitório, mensagens devolvidas à fila, publicações da outbox, referências reagendadas? |
+  | `wagering_dlq_messages_total` | `failure_code` | Quantas mensagens foram para a DLQ e por qual motivo? |
+  | `wagering_lock_conflicts_total` | `code` (`55P03`, `40P01`, `40001`, `57014`, `connection`, `other`) | Há disputa de lock, deadlock ou timeout no banco? Contado onde o erro transitório é classificado, a cada ocorrência (inclusive a que esgota as tentativas). |
+  | `wagering_outbox_pending` | (gauge) | Quantos eventos já confirmados no banco ainda não foram publicados? |
+  | `wagering_outbox_lag_seconds` | (gauge) | Há quanto tempo o evento pendente mais antigo espera? Cresce se o SQS cai ou um evento trava em retry. |
+  | `wagering_processing_duration_seconds` | histograma por `channel` e `outcome` (`processed`, `rejected`, `pending`, `replay`, `conflict`, `resolved`, `rescheduled`, `skipped`, `error`) | Quanto tempo o caso de uso leva (transação inteira, com lock e retries), por canal e resultado? |
+
+  As métricas são **por instância**: contadores locais em memória, que não participam de nenhuma
+  decisão de correção. Com várias instâncias, o Prometheus coleta cada uma e agrega (`sum by (...)`
+  sobre os contadores, `max` sobre o lag). Reiniciar uma instância zera os contadores dela, o que
+  `rate()` e `increase()` já tratam. Os gauges da outbox são lidos do banco a cada coleta, com uma
+  única consulta curta (índice parcial dos não publicados) e prazo de 1 s; se o banco não responde
+  a tempo, valem `NaN` e a coleta continua. Todas as instâncias enxergam a mesma outbox, então o
+  valor é o mesmo em cada uma (agregar com `max`, não `sum`).
 - `GET /health/live`: processo vivo, sem consultar dependências.
 - `GET /health/ready`: `SELECT 1` no Postgres e `GetQueueUrl` nas três filas, em paralelo, cada
   verificação com timeout de 2 s; `503` indicando qual dependência está `down`. O cliente SQS não
@@ -762,8 +786,8 @@ na mensagem passa pelas mesmas validações de domínio.
 
 ## 17. Próximos passos
 
-- **Métrica de outbox lag** (idade do evento pendente mais antigo) e de falhas de publicação, para
-  alertar quando o SQS estiver fora ou um evento travar em retry.
+- **Alertas** sobre as métricas já expostas (outbox lag crescendo, `wagering_dlq_messages_total`
+  subindo, conflitos de lock) e um dashboard: hoje só há o endpoint de coleta.
 - **Ordem estrita de eventos por wallet**: publicar por agregado em ordem de `wallet_version`
   (coluna de sequência na outbox e claim por agregado), em vez do melhor esforço atual.
 - **Ack em lote** (`DeleteMessageBatch`) no consumer, para reduzir chamadas ao SQS sob carga.
