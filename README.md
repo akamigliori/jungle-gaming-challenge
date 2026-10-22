@@ -36,7 +36,7 @@ docker compose --profile app up -d --build --wait   # app-1, app-2 e app-3 em lo
 curl -s localhost:3001/health/ready                 # idem para 3002 e 3003
 docker compose kill -s SIGKILL app-2                # simula a queda de uma instância
 docker compose --profile app up -d --wait app-2     # ela volta; as outras seguem processando
-docker compose --profile app down                   # derruba os containers do compose, inclusive Postgres e LocalStack (o volume é mantido)
+docker compose rm -sf migrate app-1 app-2 app-3     # derruba só as instâncias; Postgres e LocalStack seguem no ar
 ```
 
 Cada instância tem `mem_limit` de 256 MB e `stop_grace_period` de 30 s, tempo suficiente para o
