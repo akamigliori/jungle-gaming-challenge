@@ -95,6 +95,10 @@ describe('WalletRepository.lockById', () => {
     const locked = await runner.run(() => wallets.lockById(wallet.id));
     expect(locked?.balance.toJSON().amount).toBe('100.00');
     expect(locked?.version).toBe(wallet.version);
+    // SQL direto devolve TIMESTAMPTZ como texto: o repositório precisa converter
+    expect(locked?.createdAt).toBeInstanceOf(Date);
+    expect(locked?.updatedAt).toBeInstanceOf(Date);
+    expect(locked?.createdAt.getTime()).toBe(wallet.createdAt.getTime());
   });
 
   test('a second locker waits for the first transaction to commit', async () => {
