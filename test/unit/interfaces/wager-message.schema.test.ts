@@ -51,6 +51,14 @@ describe('parseWagerMessage', () => {
     expect(parse({ ...validMessage(), data }).ok).toBe(false);
   });
 
+  test('rejects a malformed occurredAt', () => {
+    expect(parse({ ...validMessage(), occurredAt: '29/07/2026 15:00' }).ok).toBe(false);
+  });
+
+  test('rejects a messageId longer than 255 characters', () => {
+    expect(parse({ ...validMessage(), messageId: 'm'.repeat(256) }).ok).toBe(false);
+  });
+
   test('rejects invalid JSON', () => {
     expect(parseWagerMessage('{').ok).toBe(false);
   });

@@ -1,12 +1,13 @@
 import { TransientFailureError } from '../../application/shared/retry-transient';
 import { DomainError } from '../../domain/shared/domain-error';
+import type { ErrorCode } from '../../domain/shared/failure-code';
 
 export const RETRY_BASE_SECONDS = 1;
 export const RETRY_MAX_SECONDS = 300;
 export const UNEXPECTED_ERROR_MAX_RECEIVES = 3;
 
 /** Erros que nunca mudam de resultado se a mensagem for reprocessada. */
-export const PERMANENT_ERROR_CODES: readonly string[] = [
+export const PERMANENT_ERROR_CODES: readonly ErrorCode[] = [
   'INVALID_PAYLOAD',
   'INVALID_MONEY',
   'REFERENCE_REQUIRED',
