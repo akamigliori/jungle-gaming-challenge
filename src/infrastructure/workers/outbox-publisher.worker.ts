@@ -3,6 +3,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { InjectPinoLogger, type PinoLogger } from 'nestjs-pino';
 import { PublishOutboxUseCase } from '../../application/messaging/publish-outbox.use-case';
 import { APP_CONFIG, type AppConfig } from '../config/config';
+import { safeError } from '../logging/safe-error';
 
 /** Subconjunto do logger usado pelo worker. */
 export type WorkerLogger = Pick<PinoLogger, 'warn' | 'error'>;
@@ -59,7 +60,7 @@ export class OutboxPublisherWorker implements OnApplicationBootstrap, BeforeAppl
       if (published >= batchSize) delayMs = 0;
     } catch (error) {
       // só o erro (banco/SQS), nunca o conteúdo dos eventos
-      this.logger.error({ err: error }, 'outbox publish cycle failed');
+      this.logger.error({ err: safeError(error) }, 'outbox publish cycle failed');
     }
     if (this.running) this.scheduleNext(delayMs);
   }
