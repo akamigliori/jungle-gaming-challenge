@@ -12,7 +12,7 @@ export const LEDGER_MAX_LIMIT = 200;
  */
 export const createWalletBodySchema = z.object({
   playerId: z.uuid(),
-  initialBalance: z.object({ amount: z.string(), currency: z.string() }),
+  initialBalance: z.strictObject({ amount: z.string(), currency: z.string() }),
 });
 
 export const walletIdParamsSchema = z.object({ walletId: z.uuid() });

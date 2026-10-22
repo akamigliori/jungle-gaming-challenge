@@ -26,6 +26,12 @@ describe('submitWagerBodySchema', () => {
     expect(parsed.playerId).toBe(UPPER_PLAYER.toLowerCase());
   });
 
+  test('rejects unknown keys inside money', () => {
+    expect(() =>
+      submitWagerBodySchema.parse(body({ money: { amount: '1.00', currency: 'BRL', extra: 1 } })),
+    ).toThrow();
+  });
+
   test('rejects unknown keys', () => {
     expect(() => submitWagerBodySchema.parse(body({ extra: 1 }))).toThrow();
   });

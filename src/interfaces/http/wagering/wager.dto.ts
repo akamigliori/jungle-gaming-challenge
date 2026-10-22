@@ -22,7 +22,7 @@ export const submitWagerBodySchema = z.strictObject({
   roundId: providerText,
   gameId: providerText,
   kind: z.enum(SUBMITTABLE_KINDS),
-  money: z.object({ amount: z.string(), currency: z.string() }),
+  money: z.strictObject({ amount: z.string(), currency: z.string() }),
   referenceExternalTransactionId: providerText.optional(),
 });
 
