@@ -73,6 +73,10 @@ vê-los, defina `TEST_LOG_LEVEL` (ex.: `TEST_LOG_LEVEL=info bun run test:integra
 | `AWS_REGION` | `us-east-1` | região AWS |
 | `AWS_ACCESS_KEY_ID` | `test` | credencial AWS (LocalStack aceita qualquer valor) |
 | `AWS_SECRET_ACCESS_KEY` | `test` | credencial AWS |
+| `OUTBOX_PUBLISHER_ENABLED` | `true` | liga o publisher da outbox nesta instância (`false` desliga; nos testes de integração o padrão é `false`) |
+| `OUTBOX_POLL_INTERVAL_MS` | `250` | intervalo entre ciclos do publisher quando não há lote cheio |
+| `OUTBOX_BATCH_SIZE` | `50` | máximo de eventos reservados por ciclo |
+| `OUTBOX_LEASE_MS` | `30000` | prazo da reserva de um lote; se a instância morrer, outra o assume depois disso |
 
 ## Endpoints
 
@@ -123,7 +127,7 @@ filtre pelo nome: `bun run test:concurrency -t "2×80.00"`.
 | 3 | wallets distintas processadas em paralelo | `10 wallets × 20 BETs of 7.00 at the same time → per wallet 14 processed, 6 INSUFFICIENT_FUNDS, balance 2.00`; complementado por `lock is per wallet: a BET on wallet B gets 201 in < 1 s while wallet A stays locked` |
 | 4 | ≥ 3 processos/instâncias simultâneos | pendente |
 | 5 | worker morto depois do commit e antes do ack | pendente |
-| 6 | dois publishers sobre a mesma outbox | pendente |
+| 6 | dois publishers sobre a mesma outbox | `two concurrent publishers over 100 events -> every event received, none claimed twice, none left pending` (em `test/integration/outbox-publisher.test.ts`, `bun run test:integration`); complementado por `lease: a claimed batch that is never published is not re-claimed before the lease expires, and is published after it` |
 | 7 | `ROLLBACK` ou `REFUND` entregue antes da referência | pendente |
 | 8 | reinício do serviço com comprovação da consistência final | pendente |
 
