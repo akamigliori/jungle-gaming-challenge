@@ -3,12 +3,10 @@ import { LedgerDirection } from '../wallet/ledger-direction';
 import type { Wallet } from '../wallet/wallet';
 import { InsufficientFundsError, ReversalInsufficientFundsError } from '../wallet/wallet-errors';
 import type { WalletLedgerEntry } from '../wallet/wallet-ledger-entry';
+import { DEFAULT_REFERENCE_RETRY, referenceRetryDelayMs } from './reference-retry';
 import type { WagerTransaction } from './wager-transaction';
 import { WagerTransactionKind as K } from './wager-transaction-kind';
 import { WagerTransactionStatus } from './wager-transaction-status';
-
-/** Espera até a primeira nova tentativa de resolver uma referência ausente. */
-export const REFERENCE_RETRY_INITIAL_DELAY_MS = 2_000;
 
 /** Transação referenciada, como o caso de uso a encontrou no banco. */
 export interface ReferenceView {
@@ -20,7 +18,7 @@ export interface ReferenceView {
 export type WagerDecision =
   | { outcome: 'PROCESSED'; entry: WalletLedgerEntry | null }
   | { outcome: 'REJECTED'; code: FailureCode }
-  | { outcome: 'PENDING_REFERENCE' };
+  | { outcome: 'PENDING_REFERENCE'; referenceFound: boolean };
 
 /** Tipos de transação que cada operação aceita como referência. */
 const ALLOWED_REFERENCE_KINDS: Partial<Record<K, K[]>> = {
@@ -68,14 +66,26 @@ function checkReference(p: {
 }): ReferenceCheck {
   const { tx, reference } = p;
   if (!hasReference(tx)) return { ok: true, referenceId: undefined };
-  if (reference === null) {
-    const nextAttemptAt = new Date(p.at.getTime() + REFERENCE_RETRY_INITIAL_DELAY_MS);
-    tx.markPendingReference({ nextAttemptAt });
-    return { ok: false, decision: { outcome: 'PENDING_REFERENCE' } };
-  }
+  if (reference === null) return { ok: false, decision: pendingReference(p, false) };
   const failure = referenceFailure(tx, reference);
+  if (failure === 'PENDING') return { ok: false, decision: pendingReference(p, true) };
   if (failure) return { ok: false, decision: reject(p, failure) };
   return { ok: true, referenceId: reference.transaction.id };
+}
+
+/**
+ * Só a primeira vez agenda a espera; numa transação já pendente a decisão volta sem mutar,
+ * e quem reagenda (contando a tentativa) é o chamador.
+ */
+function pendingReference(
+  p: { tx: WagerTransaction; at: Date },
+  referenceFound: boolean,
+): WagerDecision {
+  if (p.tx.status === WagerTransactionStatus.Pending) {
+    const delayMs = referenceRetryDelayMs(0, DEFAULT_REFERENCE_RETRY);
+    p.tx.markPendingReference({ nextAttemptAt: new Date(p.at.getTime() + delayMs) });
+  }
+  return { outcome: 'PENDING_REFERENCE', referenceFound };
 }
 
 /** WIN/LOSS só resolvem referência se ela foi informada; REFUND/ROLLBACK sempre a trazem. */
@@ -84,7 +94,10 @@ function hasReference(tx: WagerTransaction): boolean {
 }
 
 /** Primeira regra de referência violada, na ordem: pertencimento, tipo, estado, reversão, valor. */
-function referenceFailure(tx: WagerTransaction, reference: ReferenceView): FailureCode | null {
+function referenceFailure(
+  tx: WagerTransaction,
+  reference: ReferenceView,
+): FailureCode | 'PENDING' | null {
   const ref = reference.transaction;
   const sameOwner =
     ref.playerId === tx.playerId &&
@@ -93,10 +106,19 @@ function referenceFailure(tx: WagerTransaction, reference: ReferenceView): Failu
     ref.money.currency === tx.money.currency;
   if (!sameOwner) return 'REFERENCE_MISMATCH';
   if (!ALLOWED_REFERENCE_KINDS[tx.kind]?.includes(ref.kind)) return 'INVALID_REFERENCE_KIND';
+  if (isUnresolved(ref)) return 'PENDING';
   if (ref.status !== WagerTransactionStatus.Processed) return 'REFERENCE_NOT_PROCESSED';
   if (reference.alreadyReversed) return 'ALREADY_REVERSED';
   if (isReversal(tx) && !ref.money.equals(tx.money)) return 'AMOUNT_MISMATCH';
   return null;
+}
+
+/** A referência ainda vai ser decidida: vale esperar. */
+function isUnresolved(ref: WagerTransaction): boolean {
+  return (
+    ref.status === WagerTransactionStatus.Pending ||
+    ref.status === WagerTransactionStatus.PendingReference
+  );
 }
 
 function isReversal(tx: WagerTransaction): boolean {

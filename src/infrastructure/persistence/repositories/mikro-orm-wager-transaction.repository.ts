@@ -72,6 +72,7 @@ function toDomain(r: WagerTransactionRecord): WagerTransaction {
       ? Money.from({ amount: r.balanceAfter, currency: r.currency })
       : undefined,
     walletVersionAfter: r.walletVersionAfter ?? undefined,
+    referenceAttempts: r.referenceAttempts,
     nextReferenceAttemptAt: r.nextReferenceAttemptAt ?? undefined,
   });
 }
@@ -95,7 +96,7 @@ function toRecord(tx: WagerTransaction): WagerTransactionRecord {
     referenceTransactionId: tx.referenceTransactionId ?? null,
     status: tx.status,
     failureCode: tx.failureCode ?? null,
-    referenceAttempts: 0,
+    referenceAttempts: tx.referenceAttempts,
     nextReferenceAttemptAt: tx.nextReferenceAttemptAt ?? null,
     balanceAfter: tx.balanceAfter?.toJSON().amount ?? null,
     walletVersionAfter: tx.walletVersionAfter ?? null,

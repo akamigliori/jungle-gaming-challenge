@@ -1,10 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import { Money } from '../../../src/domain/shared/money';
 import {
-  decideWager,
-  REFERENCE_RETRY_INITIAL_DELAY_MS,
-  type ReferenceView,
-} from '../../../src/domain/wager/wager-decision';
+  DEFAULT_REFERENCE_RETRY,
+  referenceRetryDelayMs,
+} from '../../../src/domain/wager/reference-retry';
+import { decideWager, type ReferenceView } from '../../../src/domain/wager/wager-decision';
 import { WagerTransaction } from '../../../src/domain/wager/wager-transaction';
 import { WagerTransactionKind as K } from '../../../src/domain/wager/wager-transaction-kind';
 import { WagerTransactionStatus as S } from '../../../src/domain/wager/wager-transaction-status';
@@ -146,10 +146,10 @@ describe('decideWager WIN', () => {
   test('missing reference -> PENDING_REFERENCE with next attempt', () => {
     const tx = makeTx(K.Win, '50.00', { ref: 'ext-ref' });
     const { decision } = run(tx, null);
-    expect(decision).toEqual({ outcome: 'PENDING_REFERENCE' });
+    expect(decision).toEqual({ outcome: 'PENDING_REFERENCE', referenceFound: false });
     expect(tx.status).toBe(S.PendingReference);
     expect(tx.nextReferenceAttemptAt).toEqual(
-      new Date(at.getTime() + REFERENCE_RETRY_INITIAL_DELAY_MS),
+      new Date(at.getTime() + referenceRetryDelayMs(0, DEFAULT_REFERENCE_RETRY)),
     );
     expect(tx.balanceAfter).toBeUndefined();
   });
@@ -239,7 +239,10 @@ describe('decideWager REFUND', () => {
   });
 
   test('missing reference -> PENDING_REFERENCE', () => {
-    expect(run(refund(), null).decision).toEqual({ outcome: 'PENDING_REFERENCE' });
+    expect(run(refund(), null).decision).toEqual({
+      outcome: 'PENDING_REFERENCE',
+      referenceFound: false,
+    });
   });
 
   test.each([
@@ -301,5 +304,57 @@ describe('decideWager ROLLBACK', () => {
       outcome: 'REJECTED',
       code: 'INVALID_REFERENCE_KIND',
     });
+  });
+});
+
+describe('decideWager with pending references', () => {
+  const pendingRef = (kind: K, status: S) => {
+    const ref = makeTx(kind, '50.00', {
+      id: 'tx-ref',
+      ref: kind === K.Refund || kind === K.Rollback ? 'ext-x' : undefined,
+    });
+    if (status === S.PendingReference) ref.markPendingReference({ nextAttemptAt: at });
+    if (status === S.Rejected) ref.reject('INSUFFICIENT_FUNDS', at);
+    if (status === S.Failed) ref.fail('INSUFFICIENT_FUNDS', at);
+    return { transaction: ref, alreadyReversed: false } satisfies ReferenceView;
+  };
+  const rollback = () => makeTx(K.Rollback, '50.00', { ref: 'ext-ref' });
+
+  test('reference still PENDING_REFERENCE -> PENDING_REFERENCE with referenceFound', () => {
+    const tx = rollback();
+    const { decision } = run(tx, pendingRef(K.Win, S.PendingReference));
+    expect(decision).toEqual({ outcome: 'PENDING_REFERENCE', referenceFound: true });
+    expect(tx.status).toBe(S.PendingReference);
+  });
+
+  test('reference PENDING -> PENDING_REFERENCE with referenceFound', () => {
+    const { decision } = run(rollback(), pendingRef(K.Win, S.Pending));
+    expect(decision).toEqual({ outcome: 'PENDING_REFERENCE', referenceFound: true });
+  });
+
+  test.each([S.Rejected, S.Failed])('reference %s -> REFERENCE_NOT_PROCESSED', (status) => {
+    expect(run(rollback(), pendingRef(K.Win, status)).decision).toEqual({
+      outcome: 'REJECTED',
+      code: 'REFERENCE_NOT_PROCESSED',
+    });
+  });
+
+  test('tx already PENDING_REFERENCE with missing reference returns without mutating', () => {
+    const tx = rollback();
+    tx.markPendingReference({ nextAttemptAt: at });
+    const { decision } = run(tx, null);
+    expect(decision).toEqual({ outcome: 'PENDING_REFERENCE', referenceFound: false });
+    expect(tx.status).toBe(S.PendingReference);
+    expect(tx.referenceAttempts).toBe(0);
+    expect(tx.nextReferenceAttemptAt).toEqual(at);
+  });
+
+  test('tx already PENDING_REFERENCE with reference now PROCESSED -> PROCESSED', () => {
+    const tx = rollback();
+    tx.markPendingReference({ nextAttemptAt: at });
+    const { decision } = run(tx, processedRef(K.Win, '50.00'));
+    expect(decision.outcome).toBe('PROCESSED');
+    expect(tx.status).toBe(S.Processed);
+    expect(tx.nextReferenceAttemptAt).toBeUndefined();
   });
 });
