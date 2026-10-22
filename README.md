@@ -1,10 +1,207 @@
 # Distributed Wagering Processor
 
-Serviço que processa transações de apostas (`BET`, `WIN`, `LOSS`, `REFUND`, `ROLLBACK`) vindas de
-provedores de jogos, mantendo wallets com saldo exato e um ledger imutável. Decisões de design,
-taxonomia de erros e limitações estão em [`ARCHITECTURE.md`](ARCHITECTURE.md).
+Serviço financeiro que processa transações de apostas (`BET`, `WIN`, `LOSS`, `REFUND`, `ROLLBACK`)
+vindas de provedores de jogos por **HTTP** e por **SQS**, rodando em **várias instâncias** ao mesmo
+tempo. Cada jogador tem uma wallet com saldo exato e um ledger imutável que explica cada centavo.
 
 Stack: Bun 1.x, TypeScript (strict), NestJS, MikroORM, PostgreSQL 17, SQS (LocalStack), pino.
+Decisões completas, taxonomia de erros e limitações estão no [`ARCHITECTURE.md`](ARCHITECTURE.md);
+este README é o mapa e o guia de uso.
+
+**Neste documento:** [Visão geral](#visão-geral) · [Arquitetura](#arquitetura) ·
+[Como uma aposta é processada](#como-uma-aposta-é-processada) ·
+[Garantias e como são impostas](#garantias-e-como-são-impostas) · [Mensageria](#mensageria) ·
+[Várias instâncias](#várias-instâncias) · [Estrutura do código](#estrutura-do-código) ·
+[Pré-requisitos e setup](#pré-requisitos) · [Comandos](#comandos) · [Endpoints](#endpoints) ·
+[Testes que provam o enunciado](#cenários-obrigatórios-de-concorrência--teste)
+
+## Visão geral
+
+O que o serviço garante, e que o resto do documento mostra como:
+
+- **Saldo exato.** Dinheiro nunca é `number`: o código usa o value object `Money` (decimal), o banco
+  usa `NUMERIC(20,2)` e os contratos trafegam strings (`"25.00"`).
+- **Uma aposta, um efeito.** Reenviar a mesma requisição (HTTP ou SQS, na mesma ou em outra
+  instância) nunca debita duas vezes: a idempotência é garantida por `UNIQUE` no banco.
+- **Sem corrida no saldo.** Cada wallet tem o seu lock no Postgres; wallets diferentes andam em
+  paralelo.
+- **Nada some e nada se duplica.** Saldo, ledger, inbox e outbox são gravados na mesma transação SQL;
+  o evento só sai para a fila depois do `COMMIT`, e a mensagem de entrada só recebe `ack` depois dele.
+- **Auditável.** O ledger é append-only (trigger no banco) e um endpoint de reconciliação confere o
+  saldo gravado contra a soma do ledger.
+- **Sem estado na memória.** Qualquer instância pode morrer a qualquer momento; as outras continuam
+  sem coordenação extra.
+
+## Arquitetura
+
+```mermaid
+flowchart LR
+    P[Provedor de jogos]
+    subgraph INST["Cada instância (N iguais)"]
+        HTTP[HTTP<br/>controllers]
+        CONS[Consumer SQS]
+        UC[ProcessWagerTransaction<br/>caso de uso]
+        PUB[Publisher<br/>da outbox]
+        PEND[Worker de<br/>referências pendentes]
+    end
+    PG[(PostgreSQL<br/>wallets · transações · ledger<br/>inbox · outbox)]
+    QIN[[SQS<br/>wager-transactions.fifo]]
+    QEV[[SQS<br/>wagering-events.fifo]]
+    DLQ[[SQS<br/>DLQ]]
+
+    P -- "POST /wagering/transactions" --> HTTP
+    P -- mensagem --> QIN --> CONS
+    HTTP --> UC
+    CONS --> UC
+    CONS -. "falha permanente" .-> DLQ
+    UC -- "uma transação SQL" --> PG
+    PEND -- "reavalia pendências" --> PG
+    PUB -- "lê a outbox<br/>(FOR UPDATE SKIP LOCKED)" --> PG
+    PUB -- "publica depois do COMMIT" --> QEV
+```
+
+HTTP e SQS são apenas dois transportes para o **mesmo caso de uso**. Tudo o que importa para a
+correção está no Postgres; a fila de entrada e a de eventos são o SQS.
+
+### Camadas
+
+```
+src/
+  domain/          regras de negócio puras: Money, Wallet, WagerTransaction, ledger, erros
+  application/     casos de uso e portas (repositórios, TransactionRunner, Clock, IdGenerator)
+  infrastructure/  adaptadores: MikroORM, SQS, workers, métricas, logs, configuração
+  interfaces/      entrada: controllers HTTP, consumer SQS, filtro de erros, DTOs
+```
+
+- **A dependência aponta sempre para dentro** (`interfaces` → `application` → `domain`). O domínio
+  não importa framework, ORM nem outras camadas; `bun run check:architecture` falha o build se
+  isso mudar.
+- Entidades de domínio têm construtor privado, fábricas estáticas e estado encapsulado. As entidades
+  do ORM são classes separadas (`EntitySchema`); o repositório converte entre as duas.
+- Erros de domínio têm um `failureCode` estável (por exemplo `INSUFFICIENT_FUNDS`); a camada
+  `interfaces` traduz para status HTTP. Detalhes: [`ARCHITECTURE.md`, seções 2 a 5](ARCHITECTURE.md).
+
+## Como uma aposta é processada
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant P as Provedor
+    participant A as API ou consumer
+    participant U as Caso de uso
+    participant DB as PostgreSQL
+    P->>A: BET 25.00 (Idempotency-Key)
+    A->>U: comando validado (Money, UUIDs, hash do payload)
+    U->>DB: BEGIN
+    U->>DB: SELECT … FROM wallets WHERE id = $1 FOR UPDATE
+    U->>DB: já existe esta chave? (replay ou 409)
+    U->>U: decideWager (regras de negócio, função pura)
+    U->>DB: UPDATE wallets … WHERE version = $anterior
+    U->>DB: INSERT transação, lançamento no ledger, evento na outbox
+    U->>DB: COMMIT
+    A-->>P: 201 (ou ack no SQS, só agora)
+```
+
+| Passo | Por que assim | Se falhar aí |
+|---|---|---|
+| Valida antes de abrir a transação | entrada inválida nunca ocupa conexão nem lock | `400`, nada gravado |
+| `SELECT … FOR UPDATE` na wallet | só uma transação por wallet decide sobre o saldo, em qualquer instância | espera até 2 s; depois a falha é transitória e o caso de uso é refeito (até 3 vezes) |
+| Idempotência consultada **depois** do lock | duplicatas concorrentes esperam na fila e encontram a original já commitada | replay devolve o resultado original; payload diferente dá `409` |
+| `UPDATE … WHERE version = $anterior` | segunda defesa: se o lock faltasse, nenhuma linha mudaria | a transação falha e é desfeita |
+| Tudo na mesma transação | saldo, ledger, transação e outbox existem juntos ou não existem | crash antes do `COMMIT`: nada foi gravado e o reenvio processa normalmente |
+| Resposta ou `ack` só depois do `COMMIT` | o provedor nunca é avisado de algo que não foi gravado | crash depois do `COMMIT` e antes do `ack`: a mensagem volta, vira replay e não gera segundo efeito |
+
+Regras por tipo de transação, referência e interpretações adotadas:
+[`ARCHITECTURE.md`, seções 6 e 8](ARCHITECTURE.md).
+
+## Garantias e como são impostas
+
+O banco é a última linha de defesa: as invariantes valem mesmo se o código errar.
+
+| Garantia | Mecanismo | Onde se prova |
+|---|---|---|
+| Saldo exato | `Money` decimal, `NUMERIC(20,2)`, strings no JSON; `bun run check:money` proíbe `parseFloat`, `Number()` e afins | `test/unit/domain/money.test.ts` |
+| Saldo nunca negativo | `CHECK (balance >= 0)` na wallet, além da regra de domínio | `test/integration/schema.test.ts` |
+| Ledger append-only | trigger `ledger_append_only` bloqueia `UPDATE` e `DELETE` | `test/integration/schema.test.ts` |
+| Ledger coerente | `CHECK` aritmético do lançamento e `UNIQUE (wallet_id, wallet_version)` formam uma cadeia sem buracos | `test/integration/invariants.test.ts` |
+| Resultado da transação imutável | trigger `wager_transactions_guard`: identidade e valores nunca mudam depois de gravados | `test/integration/schema.test.ts` |
+| Idempotência | `UNIQUE (provider_id, idempotency_key)` e `UNIQUE (provider_id, external_transaction_id)` | `test/concurrency/wagering-races.test.ts` |
+| Uma reversão por referência | índice único parcial `wager_tx_single_reversal_uq` | `test/integration/schema.test.ts` |
+| Sem corrida no saldo | lock `FOR UPDATE` por wallet + `UPDATE … WHERE version` | `test/concurrency/wagering-races.test.ts` |
+| Evento nunca antes do `COMMIT` | evento gravado na tabela `outbox_messages` na mesma transação; um publisher o envia depois | `test/integration/process-wager.test.ts` e `test/integration/outbox-publisher.test.ts` |
+| Mensagem nunca perdida nem aplicada duas vezes | inbox com `UNIQUE (consumer_name, message_id)` na mesma transação; `ack` depois do `COMMIT` | `test/integration/sqs-consumer.test.ts` |
+| Saldo confere com o ledger | reconciliação sob demanda: `POST /wallets/:walletId/reconciliation` | `test/integration/reconciliation.test.ts` |
+
+A tabela completa, enunciado → teste, está em
+[Cenários obrigatórios](#cenários-obrigatórios-de-concorrência--teste) e
+[Testes obrigatórios](#testes-obrigatórios--teste-que-prova).
+
+## Mensageria
+
+O consumer lê `wager-transactions.fifo` e chama o mesmo caso de uso do HTTP. O `MessageGroupId` é a
+wallet, então a ordem por wallet se mantém entre laços e entre instâncias.
+
+| O que aconteceu com a mensagem | O que o consumer faz |
+|---|---|
+| Resultado gravado (`PROCESSED`, `REJECTED`, `PENDING_REFERENCE`, replay) | `ack` **depois** do `COMMIT` |
+| Erro permanente (payload inválido, wallet inexistente, conflito de idempotência) | vai direto para a DLQ, com `failureCode`; reprocessar nunca mudaria o resultado |
+| Falha transitória (lock, deadlock, conexão) | volta para a fila com backoff exponencial e jitter; depois de 10 entregas o SQS a leva para a DLQ |
+| Erro inesperado (bug) | backoff nas duas primeiras entregas; na terceira, DLQ explícita com `INTERNAL_ERROR` |
+
+- **Rejeição de negócio não é falha da mensagem.** Saldo insuficiente grava uma transação
+  `REJECTED` e a mensagem recebe `ack`.
+- **Referência fora de ordem.** Um `REFUND` ou `ROLLBACK` que chega antes da `BET` fica
+  `PENDING_REFERENCE` (`202`); um worker o reavalia até a referência chegar ou o limite de
+  tentativas acabar (`REJECTED` com `REFERENCE_NOT_FOUND`).
+- **Eventos.** A outbox é publicada em `wagering-events.fifo` (grupo = wallet, deduplicação =
+  `eventId`). Se o publisher morrer no meio, outro assume o lote depois do lease; o pior caso é
+  publicação duplicada, tratada pela deduplicação, nunca perda.
+
+Detalhes e justificativas: [`ARCHITECTURE.md`, seções 11 e 12](ARCHITECTURE.md).
+
+## Várias instâncias
+
+Nenhum estado que importa para a correção fica na memória de um processo. Por isso `N` instâncias
+iguais dividem o trabalho sem coordenação:
+
+| Peça | O que impede duas instâncias de pisarem uma na outra |
+|---|---|
+| HTTP e consumer | lock da linha da wallet e `UNIQUE` de idempotência e de inbox |
+| Consumer | o SQS FIFO não entrega o mesmo grupo (wallet) a dois receptores ao mesmo tempo |
+| Publisher da outbox | reserva com `FOR UPDATE SKIP LOCKED` + lease; reenvio deduplicado pelo `eventId` |
+| Worker de pendências | a mesma reserva com lease e o lock da wallet na reavaliação |
+
+O Compose sobe três instâncias ([como](#três-instâncias-com-docker)), e o teste com três processos
+reais, com `SIGKILL`, `SIGTERM` e reinício, prova que nada se perde nem se duplica. O
+[teste de carga](#teste-de-carga) exercita as três instâncias juntas e termina reconciliando todas
+as wallets.
+
+## Estrutura do código
+
+```
+src/
+  domain/
+    shared/        Money, códigos de falha, erros base
+    wallet/        Wallet, lançamento do ledger
+    wager/         WagerTransaction, decisão (decideWager), tipos e estados
+    events/        eventos de integração
+    messaging/     inbox e outbox como conceitos de domínio
+  application/
+    wager/         processa transação, resolve referência pendente
+    wallet/        criação e reconciliação de wallets
+    messaging/     publicação da outbox
+    ports/         interfaces de repositório, relógio, ids, transação
+  infrastructure/
+    persistence/   schemas, repositórios, queries e migrations
+    sqs/           cliente SQS e publisher de eventos
+    workers/       loops do publisher da outbox e das referências pendentes
+    metrics/ logging/ config/ auth/ ids/ time/
+  interfaces/
+    http/          controllers (wagering, wallets, health, metrics) e filtro de erros
+    sqs/           consumer, schema da mensagem e política de falha
+scripts/           migrate, demo, load, check-money, check-architecture
+test/              unit · integration · concurrency · multi-instance
+```
 
 ## Pré-requisitos
 
