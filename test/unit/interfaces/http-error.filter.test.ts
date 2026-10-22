@@ -148,4 +148,21 @@ describe('HttpErrorFilter', () => {
     expect(c.logs).toHaveLength(1);
     expect(c.logs[0]?.level).not.toBe('error');
   });
+
+  test('5xx log keeps only safe driver fields, never the query or its values', () => {
+    const driver = Object.assign(
+      new Error(
+        "INSERT INTO wallets (player_id, balance) VALUES ('player-secret', '123.45') - new row violates check constraint",
+      ),
+      { code: '23514', constraint: 'wallets_balance_non_negative', table: 'wallets' },
+    );
+    const c = run(new TransientFailureError(driver));
+
+    expect(c.status).toBeGreaterThanOrEqual(500);
+    const logged = JSON.stringify(c.logs[0]?.obj);
+    expect(logged).toContain('23514');
+    expect(logged).toContain('wallets_balance_non_negative');
+    expect(logged).not.toContain('player-secret');
+    expect(logged).not.toContain('123.45');
+  });
 });

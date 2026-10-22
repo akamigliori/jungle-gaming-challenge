@@ -49,6 +49,7 @@ interface WagerOverrides {
   externalTransactionId?: string;
   kind?: string;
   amount?: string;
+  currency?: string;
   referenceExternalTransactionId?: string;
   walletId?: string;
   playerId?: string;
@@ -63,7 +64,7 @@ function wagerBody(walletId: string, o: WagerOverrides = {}) {
     roundId: 'round-1',
     gameId: 'game-1',
     kind: o.kind ?? 'BET',
-    money: { amount: o.amount ?? '25.00', currency: 'BRL' },
+    money: { amount: o.amount ?? '25.00', currency: o.currency ?? 'BRL' },
     ...(o.referenceExternalTransactionId
       ? { referenceExternalTransactionId: o.referenceExternalTransactionId }
       : {}),
@@ -196,6 +197,23 @@ describe('POST /wagering/transactions', () => {
     expect(replay.body.transactionId).toBe(first.body.transactionId);
     expect(replay.body.idempotentReplay).toBe(true);
     expect(replay.headers.get('idempotent-replayed')).toBe('true');
+  });
+
+  test('BET in another currency → 422 CURRENCY_MISMATCH with null balance, identical on replay and GET', async () => {
+    const walletId = await createWallet();
+
+    const first = await submit(walletId, { currency: 'USD' });
+    const replay = await submit(walletId, { currency: 'USD' });
+    const got = await send('GET', `/wagering/transactions/${first.body.transactionId}`);
+
+    expect(first.status).toBe(422);
+    expect(first.body.error?.code).toBe('CURRENCY_MISMATCH');
+    expect(first.body.balance).toBeNull();
+    expect(replay.status).toBe(422);
+    expect(replay.headers.get('idempotent-replayed')).toBe('true');
+    expect(replay.body).toEqual({ ...first.body, idempotentReplay: true });
+    expect(got.status).toBe(200);
+    expect(got.body).toMatchObject({ failureCode: 'CURRENCY_MISMATCH', balanceAfter: null });
   });
 
   test('REFUND before its BET → 202 PENDING_REFERENCE with null balance', async () => {

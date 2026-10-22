@@ -101,8 +101,11 @@ describe('decideWager BET', () => {
   });
 
   test('currency different from the wallet -> CURRENCY_MISMATCH', () => {
-    const { decision } = run(makeTx(K.Bet, '10.00', { currency: 'USD' }));
+    const tx = makeTx(K.Bet, '10.00', { currency: 'USD' });
+    const { decision } = run(tx);
     expect(decision).toEqual({ outcome: 'REJECTED', code: 'CURRENCY_MISMATCH' });
+    expect(tx.balanceAfter).toBeUndefined();
+    expect(tx.walletVersionAfter).toBeUndefined();
   });
 
   test('other player -> PLAYER_MISMATCH, checked before currency', () => {
