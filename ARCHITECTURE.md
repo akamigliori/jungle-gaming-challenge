@@ -699,7 +699,8 @@ na mensagem passa pelas mesmas validações de domínio.
   `kind`, `status`, `failureCode` (só em `REJECTED`), `idempotentReplay` e `durationMs`; no SQS,
   também `messageId` (id do envelope, igual ao `correlationId`), `sqsMessageId` e `receiveCount`. No
   HTTP, `walletId` e `providerId` são ligados ao logger da requisição assim que o corpo é validado,
-  então aparecem também na linha de erro do filtro global e na linha de conclusão da requisição.
+  (`assignResponse`), então aparecem também na linha de erro do filtro global e na linha de
+  conclusão da requisição. Antes dessa validação (respostas `400`) só o `correlationId` existe.
 - Falhas carregam os ids disponíveis e o erro sempre reduzido por `safeError` (nome, SQLSTATE,
   constraint e tabela; sem a query nem a stack de erros do driver). O publisher da outbox loga cada
   mensagem que falhou com `eventId`, `eventType`, `aggregateId`, `attempts` e o erro; o worker de
