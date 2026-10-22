@@ -263,7 +263,9 @@ refeito por `retryTransient`.
 
 **Fila de entrada do SQS.** O `VisibilityTimeout` da fila de entrada é de 60 s, acima do pior caso
 de ≈ 24,3 s do processamento, para que a mensagem não volte a ficar visível enquanto a primeira
-execução ainda roda. A `maxReceiveCount` da redrive policy é 10. Os nomes das filas são
+execução ainda roda. O prazo conta a partir do recebimento, então uma mensagem que espera atrás de
+outras do mesmo grupo no mesmo lote pode ultrapassá-lo. Isso é seguro (inbox, lock da wallet e
+ordem FIFO) e custa só um replay. A `maxReceiveCount` da redrive policy é 10. Os nomes das filas são
 configuráveis por `SQS_TRANSACTIONS_QUEUE`, `SQS_TRANSACTIONS_DLQ` e `SQS_EVENTS_QUEUE`. O motivo
 do 10 e o que as filas de produção precisam repetir estão na seção 12.
 
@@ -280,8 +282,9 @@ wallet em outra conexão confere que a re-execução seguinte grava normalmente)
 conexão quebrada e abre outra na próxima requisição (conferido à mão com um pool de uma única
 conexão: a consulta seguinte roda num novo processo do Postgres). Isso importa porque o consumer
 SQS é um laço de vida longa: falhas transitórias repetidas não podem esgotar o pool. O teste do
-consumer em que as duas primeiras entregas falham com `lock_timeout` e a terceira grava mostra o
-laço seguindo em frente depois das falhas.
+consumer em que as duas primeiras entregas falham com `lock_timeout` simulado e a terceira grava
+mostra o laço seguindo em frente depois das falhas; a recuperação do pool fica com a verificação
+manual descrita acima.
 
 **Como é testado** (`test/concurrency/wagering-races.test.ts`, requisições HTTP reais disparadas
 juntas com `Promise.all` contra Postgres real): saldo `100.00` com duas apostas de `80.00` em 10
@@ -474,18 +477,25 @@ uma mensagem do grupo está em voo, o SQS segura o grupo inteiro; é o comportam
 **Desligamento (`SIGTERM`).** No `beforeApplicationShutdown`, antes de o Nest fechar o HTTP, o pool
 do Postgres e o cliente SQS:
 
-1. o consumer para de receber e aborta os long polls em andamento;
-2. mensagens recebidas e ainda não iniciadas voltam para a fila na hora
-   (`ChangeMessageVisibility` = 0). Na prática são as que estão atrás de uma em andamento no
-   mesmo grupo, e cada grupo as devolve quando chega nelas: antes disso o SQS não as entregaria a
-   ninguém, porque a mensagem em andamento segura o grupo;
+1. o consumer para de iniciar novos long polls. O que está em andamento não é abortado e termina
+   em até `SQS_WAIT_TIME_SECONDS`: o SQS pode atender um `ReceiveMessage` cujo cliente já
+   desistiu, e a mensagem "recebida" por ninguém ficaria escondida pelo visibility timeout (60 s
+   de atraso para o grupo da wallet), com uma entrega a mais no contador;
+2. mensagens recebidas durante o desligamento, ou atrás de uma em andamento no mesmo grupo, voltam
+   para a fila com `ChangeMessageVisibility` = 0 assim que o grupo chega nelas: antes disso o SQS
+   não as entregaria a ninguém, porque a mensagem em andamento segura o grupo;
 3. as mensagens em andamento terminam e recebem ack, com prazo de `SHUTDOWN_TIMEOUT_MS` (20 s).
    Estourado o prazo, o shutdown segue: a transação aberta é desfeita quando o pool fecha e a
    mensagem reaparece depois do visibility timeout.
 
+Como o desligamento espera o long poll em andamento, `SHUTDOWN_TIMEOUT_MS` precisa cobrir
+`SQS_WAIT_TIME_SECONDS` + 5 s (a folga do timeout HTTP do long poll); a configuração recusa um
+valor menor na inicialização.
+
 O `main.ts` arma, no `SIGTERM`/`SIGINT`, um timer de saída forçada de `SHUTDOWN_TIMEOUT_MS` + 5 s
-(`process.exit(1)`), para que um hook travado nunca deixe o processo pendurado; o total fica abaixo
-dos 30 s que um orquestrador costuma esperar antes do `SIGKILL`. Num `SIGKILL` nada disso roda: o
+(`process.exit(1)`), para que um hook travado nunca deixe o processo pendurado. Com os valores
+padrão, o total fica abaixo dos 30 s que um orquestrador costuma esperar antes do `SIGKILL`; em
+geral, o prazo do orquestrador precisa ser maior que `SHUTDOWN_TIMEOUT_MS` + 5 s. Num `SIGKILL` nada disso roda: o
 Postgres desfaz a transação ao perder a conexão e as mensagens voltam depois do visibility timeout,
 sem efeito duplicado por causa da inbox e da idempotência.
 
@@ -516,8 +526,9 @@ na DLQ como `IDEMPOTENCY_CONFLICT`; JSON quebrado, valor numérico e wallet inex
 primeira entrega; a mesma aposta por HTTP e por SQS; a ordem FIFO descrita acima; transitório que
 se resolve na 3ª entrega, sem DLQ; erro inesperado na DLQ como `INTERNAL_ERROR`, recebido
 exatamente 3 vezes; instância que morre entre `COMMIT` e ack (outra instância confirma, sem segundo
-efeito); e shutdown no meio de uma mensagem (ela termina e é confirmada; a não iniciada do mesmo
-grupo volta visível na hora e é processada por uma instância nova).
+efeito); shutdown no meio de uma mensagem (ela termina e é confirmada; a não iniciada do mesmo
+grupo volta visível na hora e é processada por uma instância nova); e shutdown com um long poll
+aberto (a mensagem enviada durante o desligamento continua visível, sem entrega fantasma).
 
 ## 13. Autenticação
 
@@ -576,12 +587,11 @@ na mensagem passa pelas mesmas validações de domínio.
   uma que falhou no mesmo grupo, ou não iniciadas num desligamento) também têm o
   `ApproximateReceiveCount` incrementado. Se a da frente esgotar as entregas, as de trás podem ir
   para a DLQ pelo redrive sem nunca terem falhado. Devolver a DLQ para a fila principal é seguro:
-  a inbox e a idempotência impedem efeito duplicado. Contar as falhas reais no banco resolveria,
-  com mais schema e lógica para um caso raro.
-- **Long poll abortado no desligamento.** O SQS pode atender um `ReceiveMessage` cujo cliente já
-  desistiu: a mensagem fica invisível pelo visibility timeout e a entrega é contada sem ninguém
-  processá-la. Resultado: atraso e uma entrega a mais no contador, nunca perda nem efeito
-  duplicado.
+  a inbox e a idempotência impedem efeito duplicado. Essas entregas sem processamento também
+  contam para o limite do erro inesperado: uma mensagem atrás de uma que falha pode chegar à
+  primeira tentativa real já com 3 ou mais entregas (um único erro inesperado a manda para a DLQ
+  como `INTERNAL_ERROR`), e o backoff de um transitório dela começa mais alto. Contar as falhas
+  reais no banco resolveria, com mais schema e lógica para um caso raro.
 - **Duplicata na DLQ fora da janela de 5 min.** Se o processo morrer entre o envio para a DLQ e o
   ack na fila principal, e a mensagem voltar depois da janela de deduplicação do SQS, ela aparece
   duas vezes na DLQ. Reprocessá-la continua seguro pela inbox e pela idempotência.

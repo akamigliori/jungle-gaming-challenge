@@ -85,7 +85,7 @@ vê-los, defina `TEST_LOG_LEVEL` (ex.: `TEST_LOG_LEVEL=info bun run test:integra
 | `SQS_CONSUMER_LOOPS` | `2` | laços de recebimento independentes por instância |
 | `SQS_RECEIVE_BATCH_SIZE` | `4` | máximo de mensagens por recebimento (até 10); laços × lote = transações ao mesmo tempo, abaixo do pool de 10 conexões |
 | `SQS_WAIT_TIME_SECONDS` | `10` | duração do long polling do consumer (até 20) |
-| `SHUTDOWN_TIMEOUT_MS` | `20000` | prazo para as mensagens em andamento terminarem no desligamento |
+| `SHUTDOWN_TIMEOUT_MS` | `20000` | prazo para as mensagens em andamento terminarem no desligamento; precisa ser ≥ `SQS_WAIT_TIME_SECONDS` × 1000 + 5000 |
 
 ## Endpoints
 
