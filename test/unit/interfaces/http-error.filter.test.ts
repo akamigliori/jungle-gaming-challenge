@@ -123,7 +123,7 @@ describe('HttpErrorFilter', () => {
   });
 
   test('database connection error → 503 retryable with Retry-After', () => {
-    const c = run(new ConnectionException(new Error('connect ECONNREFUSED 127.0.0.1:5433')));
+    const c = run(new ConnectionException(new Error('connect ECONNREFUSED 127.0.0.1:5432')));
     expect(c.status).toBe(503);
     expect(c.headers['Retry-After']).toBeDefined();
     expect(c.body).toEqual({

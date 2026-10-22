@@ -16,13 +16,14 @@ Stack: Bun 1.x, TypeScript (strict), NestJS, MikroORM, PostgreSQL 17, SQS (Local
 ```bash
 bun install
 cp .env.example .env          # opcional: os defaults já apontam para o docker compose
-docker compose up -d --wait   # Postgres (porta 5433 do host) e LocalStack com as filas SQS
+docker compose up -d --wait   # Postgres (porta 5432 do host) e LocalStack com as filas SQS
 bun run migration:up          # aplica as migrations no banco `wagering`
 bun run dev                   # API em http://localhost:3000 (recarrega ao salvar)
 ```
 
-O Postgres é publicado na porta **5433** do host (e não 5432) para não conflitar com uma
-instalação local. Na primeira subida do volume, o container também cria o banco `wagering_test`,
+O Postgres é publicado na porta padrão **5432** do host. Se já houver um Postgres local nela,
+defina `POSTGRES_HOST_PORT=5433` e `DB_PORT=5433` no `.env` (o Compose e a aplicação leem as duas).
+Na primeira subida do volume, o container também cria o banco `wagering_test`,
 usado pelos testes de integração. Se o volume já existia antes, crie-o à mão:
 `docker compose exec postgres createdb -U wagering wagering_test`.
 
@@ -99,7 +100,7 @@ vê-los, defina `TEST_LOG_LEVEL` (ex.: `TEST_LOG_LEVEL=info bun run test:integra
 | `PORT` | `3000` | porta HTTP da API |
 | `LOG_LEVEL` | `info` | nível de log do pino (`silent` desliga) |
 | `DB_HOST` | `localhost` | host do Postgres |
-| `DB_PORT` | `5433` | porta do Postgres |
+| `DB_PORT` | `5432` | porta do Postgres |
 | `DB_USER` | `wagering` | usuário do Postgres |
 | `DB_PASSWORD` | `wagering` | senha do Postgres |
 | `DB_NAME` | `wagering` | banco da aplicação |
