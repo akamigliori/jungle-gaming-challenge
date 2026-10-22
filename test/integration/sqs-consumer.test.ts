@@ -25,6 +25,7 @@ import {
 import { createTestApp, type OverrideProviders, type TestApp } from './support/app';
 import { resetDb, withTestDb } from './support/db';
 import { assertLedgerInvariant } from './support/invariants';
+import { scrapeMetrics, seriesValue } from './support/metrics';
 import { createTestQueues, type TestQueues } from './support/queues';
 import { waitFor } from './support/wait';
 
@@ -183,6 +184,7 @@ describe('SQS consumer', () => {
   });
 
   test('a redelivered message (same messageId) debits once and both deliveries are acked', async () => {
+    const before = await scrapeMetrics(t.baseUrl);
     const walletId = await createWallet();
     const data = betData(walletId);
     const message = envelope(data);
@@ -197,9 +199,16 @@ describe('SQS consumer', () => {
     expect(await inboxRows(message.messageId)).toBe(1);
     expect(await balanceOf(walletId)).toBe('75.00');
     expect(await queues.receiveAll('transactionsDlq')).toEqual([]);
+    const after = await scrapeMetrics(t.baseUrl);
+    const delta = (series: string) => seriesValue(after, series) - seriesValue(before, series);
+    expect(delta('wagering_duplicates_total{type="inbox_redelivery"}')).toBe(1);
+    expect(delta('wagering_transactions_total{channel="sqs",kind="BET",status="PROCESSED"}')).toBe(
+      1,
+    );
   });
 
   test('the same messageId with a different payload goes to the DLQ as IDEMPOTENCY_CONFLICT', async () => {
+    const before = await scrapeMetrics(t.baseUrl);
     const walletId = await createWallet();
     const data = betData(walletId);
     const message = envelope(data);
@@ -220,6 +229,10 @@ describe('SQS consumer', () => {
     await waitQueueEmpty();
     expect(await debitsOf(walletId)).toBe(1);
     expect(await balanceOf(walletId)).toBe('75.00');
+    const after = await scrapeMetrics(t.baseUrl);
+    const delta = (series: string) => seriesValue(after, series) - seriesValue(before, series);
+    expect(delta('wagering_duplicates_total{type="inbox_conflict"}')).toBe(1);
+    expect(delta('wagering_dlq_messages_total{failure_code="IDEMPOTENCY_CONFLICT"}')).toBe(1);
   });
 
   test('invalid messages go to the DLQ on the first delivery and nothing is written', async () => {

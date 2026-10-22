@@ -18,6 +18,7 @@ import type { OutboxMessage } from '../../src/domain/messaging/outbox-message';
 import { loadConfig } from '../../src/infrastructure/config/config';
 import { createSqsClient } from '../../src/infrastructure/sqs/sqs.client';
 import { SqsEventPublisher } from '../../src/infrastructure/sqs/sqs-event-publisher';
+import { noopMetrics } from '../support/noop-metrics';
 import { createTestApp, type TestApp } from './support/app';
 import { resetDb, withTestDb } from './support/db';
 import { assertLedgerInvariant } from './support/invariants';
@@ -152,6 +153,7 @@ function newPublisher(clock: Clock, publisher?: EventPublisher, batchSize = 50) 
     outbox,
     publisher: publisher ?? new SqsEventPublisher(sqs, config),
     clock,
+    metrics: noopMetrics,
     batchSize,
     leaseMs: LEASE_MS,
   });

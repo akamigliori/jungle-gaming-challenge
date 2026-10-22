@@ -12,11 +12,13 @@ import type { BeforeApplicationShutdown, OnApplicationBootstrap } from '@nestjs/
 import { Inject, Injectable } from '@nestjs/common';
 import { InjectPinoLogger, type PinoLogger } from 'nestjs-pino';
 import { CLOCK, type Clock } from '../../application/ports/clock';
+import { METRICS, type Metrics } from '../../application/ports/metrics';
 import {
   type ProcessWagerCommand,
   type ProcessWagerResult,
   ProcessWagerTransactionUseCase,
 } from '../../application/wager/process-wager-transaction.use-case';
+import type { FailureCode } from '../../domain/shared/failure-code';
 import type { WagerTransactionKind } from '../../domain/wager/wager-transaction-kind';
 import {
   APP_CONFIG,
@@ -33,7 +35,7 @@ export const CONSUMER_NAME = 'wager-transactions-consumer';
 
 /** Espera depois de um ciclo de recebimento com erro (SQS fora do ar, fila inexistente). */
 const RECEIVE_ERROR_BACKOFF_MS = 1000;
-const INVALID_PAYLOAD_CODE = 'INVALID_PAYLOAD';
+const INVALID_PAYLOAD_CODE: FailureCode = 'INVALID_PAYLOAD';
 /** Visibilidade 0: a mensagem devolvida no shutdown fica disponível na hora para outra instância. */
 const RELEASE_NOW_SECONDS = 0;
 
@@ -90,6 +92,7 @@ export class WagerTransactionsConsumer
     @Inject(SQS_CLIENT) private readonly sqs: SQSClient,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
     @Inject(CLOCK) private readonly clock: Clock,
+    @Inject(METRICS) private readonly metrics: Metrics,
     @InjectPinoLogger(WagerTransactionsConsumer.name) private readonly logger: ConsumerLogger,
   ) {}
 
@@ -279,6 +282,7 @@ export class WagerTransactionsConsumer
       return { left: true };
     }
     await this.changeVisibility(message, action.delaySeconds, urls);
+    this.metrics.retryScheduled('sqs_visibility');
     this.logger.warn(
       { ...context, err: safeError(error), retryInSeconds: action.delaySeconds },
       'wager message will be retried',
@@ -304,7 +308,11 @@ export class WagerTransactionsConsumer
    * Envia o mesmo corpo para a DLQ e só então dá ack na principal. Se o processo morrer entre os
    * dois, a mensagem volta, falha de novo e o reenvio é deduplicado pelo SQS (`MessageId` original).
    */
-  private async deadLetter(message: Message, failureCode: string, urls: QueueUrls): Promise<void> {
+  private async deadLetter(
+    message: Message,
+    failureCode: FailureCode,
+    urls: QueueUrls,
+  ): Promise<void> {
     await this.sqs.send(
       new SendMessageCommand({
         QueueUrl: urls.transactionsDlq,
@@ -317,6 +325,7 @@ export class WagerTransactionsConsumer
         },
       }),
     );
+    this.metrics.messageDeadLettered(failureCode);
     await this.ack(message, urls.transactions);
   }
 

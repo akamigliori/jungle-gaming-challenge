@@ -6,6 +6,7 @@ import {
   LEDGER_REPOSITORY,
   type LedgerRepository,
 } from '../../src/application/ports/ledger.repository';
+import { METRICS, type Metrics } from '../../src/application/ports/metrics';
 import {
   OUTBOX_REPOSITORY,
   type OutboxRepository,
@@ -362,6 +363,7 @@ describe('ResolvePendingReferenceUseCase', () => {
       outbox: t.app.get<OutboxRepository>(OUTBOX_REPOSITORY),
       ids: t.app.get<IdGenerator>(ID_GENERATOR),
       clock: t.app.get<Clock>(CLOCK),
+      metrics: t.app.get<Metrics>(METRICS),
       isTransient: isTransientDbError,
       referenceRetry: RETRY_POLICY,
     });

@@ -1,13 +1,13 @@
 import { TransientFailureError } from '../../application/shared/retry-transient';
 import { DomainError } from '../../domain/shared/domain-error';
-import type { ErrorCode } from '../../domain/shared/failure-code';
+import type { ErrorCode, FailureCode } from '../../domain/shared/failure-code';
 
 export const RETRY_BASE_SECONDS = 1;
 export const RETRY_MAX_SECONDS = 300;
 export const UNEXPECTED_ERROR_MAX_RECEIVES = 3;
 
 /** Erros que nunca mudam de resultado se a mensagem for reprocessada. */
-export const PERMANENT_ERROR_CODES: readonly ErrorCode[] = [
+export const PERMANENT_ERROR_CODES: readonly FailureCode[] = [
   'INVALID_PAYLOAD',
   'INVALID_MONEY',
   'REFERENCE_REQUIRED',
@@ -15,12 +15,12 @@ export const PERMANENT_ERROR_CODES: readonly ErrorCode[] = [
   'IDEMPOTENCY_CONFLICT',
 ];
 
-const INTERNAL_ERROR_CODE = 'INTERNAL_ERROR';
+const INTERNAL_ERROR_CODE: FailureCode = 'INTERNAL_ERROR';
 const MIN_JITTER_FACTOR = 0.5;
 
 export type MessageAction =
   | { kind: 'retry'; delaySeconds: number }
-  | { kind: 'dead-letter'; failureCode: string };
+  | { kind: 'dead-letter'; failureCode: FailureCode };
 
 /**
  * Decide o destino de uma mensagem cujo processamento lançou erro: o que foi gravado recebe ack;
@@ -32,7 +32,7 @@ export function failureAction(
   receiveCount: number,
   random: () => number = Math.random,
 ): MessageAction {
-  if (error instanceof DomainError && PERMANENT_ERROR_CODES.includes(error.code)) {
+  if (error instanceof DomainError && isPermanent(error.code)) {
     return { kind: 'dead-letter', failureCode: error.code };
   }
   const isTransient = error instanceof TransientFailureError;
@@ -47,4 +47,8 @@ function backoffSeconds(receiveCount: number, random: () => number): number {
   const exponential = Math.min(RETRY_BASE_SECONDS * 2 ** (receiveCount - 1), RETRY_MAX_SECONDS);
   const jittered = exponential * (MIN_JITTER_FACTOR + random() * (1 - MIN_JITTER_FACTOR));
   return Math.max(1, Math.round(jittered));
+}
+
+function isPermanent(code: ErrorCode): code is FailureCode {
+  return (PERMANENT_ERROR_CODES as readonly ErrorCode[]).includes(code);
 }

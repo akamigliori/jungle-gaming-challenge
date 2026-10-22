@@ -1,12 +1,14 @@
 import type { OutboxMessage } from '../../domain/messaging/outbox-message';
 import type { Clock } from '../ports/clock';
 import type { EventPublisher } from '../ports/event-publisher';
+import type { Metrics } from '../ports/metrics';
 import type { OutboxRepository } from '../ports/outbox.repository';
 
 export interface PublishOutboxDeps {
   outbox: OutboxRepository;
   publisher: EventPublisher;
   clock: Clock;
+  metrics: Metrics;
   /** Máximo de mensagens reservadas por ciclo. */
   batchSize: number;
   /** Por quanto tempo a reserva de um lote impede outra instância de pegá-lo. */
@@ -94,10 +96,11 @@ export class PublishOutboxUseCase {
     message: OutboxMessage,
     claimedUntil: Date,
   ): Promise<PublishFailure | undefined> {
-    const { outbox, publisher, clock, random } = this.deps;
+    const { outbox, publisher, clock, metrics, random } = this.deps;
     try {
       await publisher.publish(message);
     } catch (error) {
+      metrics.retryScheduled('outbox_publish');
       message.scheduleRetry(clock.now(), random);
       await outbox.reschedule(message, { error: describeError(error), claimedUntil });
       return {

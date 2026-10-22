@@ -20,6 +20,10 @@ export interface RetryPolicy {
   /** Total de execuções, contando a primeira. */
   maxAttempts: number;
   baseDelayMs: number;
+  /** Chamado a cada erro transitório, inclusive o da última tentativa. */
+  onTransient?: (error: unknown) => void;
+  /** Chamado quando uma nova tentativa vai acontecer. */
+  onRetry?: () => void;
   random?: () => number;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -41,7 +45,9 @@ export async function retryTransient<T>(work: () => Promise<T>, p: RetryPolicy):
       return await work();
     } catch (error) {
       if (!p.isTransient(error)) throw error;
+      p.onTransient?.(error);
       if (attempt >= p.maxAttempts) throw new TransientFailureError(error);
+      p.onRetry?.();
       await sleep(random() * p.baseDelayMs * 2 ** attempt);
     }
   }
