@@ -100,4 +100,35 @@ describe('PrometheusMetrics', () => {
     const text = await metrics().render();
     expect(text).toContain('process_cpu_user_seconds_total');
   });
+
+  test('concurrent scrapes share one backlog query, and a slow one is not restarted', async () => {
+    let reads = 0;
+    const m = metrics(async () => {
+      reads += 1;
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return { pending: 1, oldestAgeSeconds: 0 };
+    });
+    await Promise.all([m.render(), m.render(), m.render()]);
+    expect(reads).toBe(1);
+
+    // leitura que passa do prazo: a coleta seguinte reaproveita a mesma, sem abrir outra
+    let slowReads = 0;
+    const slow = metrics(() => {
+      slowReads += 1;
+      return new Promise(() => undefined);
+    }, 10);
+    await slow.render();
+    await slow.render();
+    expect(slowReads).toBe(1);
+  });
+
+  test('after a read finishes, the next scrape queries again', async () => {
+    let reads = 0;
+    const m = metrics(async () => {
+      reads += 1;
+      return { pending: reads, oldestAgeSeconds: 0 };
+    });
+    await m.render();
+    expect(await m.render()).toContain('wagering_outbox_pending 2');
+  });
 });
