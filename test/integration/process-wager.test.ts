@@ -3,6 +3,10 @@ import type { MikroORM } from '@mikro-orm/postgresql';
 import { CLOCK, type Clock } from '../../src/application/ports/clock';
 import { ID_GENERATOR, type IdGenerator } from '../../src/application/ports/id-generator';
 import {
+  INBOX_REPOSITORY,
+  type InboxRepository,
+} from '../../src/application/ports/inbox.repository';
+import {
   LEDGER_REPOSITORY,
   type LedgerRepository,
 } from '../../src/application/ports/ledger.repository';
@@ -123,6 +127,7 @@ function buildUseCase(over: Partial<ProcessWagerDeps>): ProcessWagerTransactionU
     wallets: t.app.get<WalletRepository>(WALLET_REPOSITORY),
     transactions: t.app.get<WagerTransactionRepository>(WAGER_TRANSACTION_REPOSITORY),
     ledger: t.app.get<LedgerRepository>(LEDGER_REPOSITORY),
+    inbox: t.app.get<InboxRepository>(INBOX_REPOSITORY),
     outbox: t.app.get<OutboxRepository>(OUTBOX_REPOSITORY),
     ids: t.app.get<IdGenerator>(ID_GENERATOR),
     clock: t.app.get<Clock>(CLOCK),
@@ -481,6 +486,93 @@ describe('ProcessWagerTransactionUseCase — validation and failures', () => {
     expect(result.transaction.status).toBe(WagerTransactionStatus.Processed);
     expect(await walletRow(walletId)).toEqual({ balance: '75.00', version: 2 });
     expect(await counts()).toEqual({ transactions: 1, ledger: 2, outbox: 4 });
+  });
+});
+
+describe('ProcessWagerTransactionUseCase — inbox', () => {
+  const receipt = (over: Partial<{ messageId: string; payloadHash: string }> = {}) => ({
+    consumerName: 'transactions-consumer',
+    messageId: 'msg-1',
+    payloadHash: 'a'.repeat(64),
+    ...over,
+  });
+
+  const inboxRows = () =>
+    sql<{ message_id: string; processed_at: Date | null; received_at: Date }>(
+      'SELECT message_id, received_at, processed_at FROM inbox_messages',
+    );
+
+  test('command with a receipt writes the inbox row together with transaction, ledger and outbox', async () => {
+    const walletId = await createWallet();
+
+    const result = await useCase.execute({ ...command(walletId), inbox: receipt() });
+
+    expect(result.idempotentReplay).toBe(false);
+    const rows = await inboxRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.message_id).toBe('msg-1');
+    expect(rows[0]?.processed_at).not.toBeNull();
+    expect(await counts()).toEqual({ transactions: 1, ledger: 2, outbox: 4 });
+  });
+
+  test('same command and receipt again → replay; one inbox row and one ledger effect', async () => {
+    const walletId = await createWallet();
+    const cmd = { ...command(walletId), inbox: receipt() };
+    await useCase.execute(cmd);
+
+    const replay = await useCase.execute(cmd);
+
+    expect(replay.idempotentReplay).toBe(true);
+    expect(await inboxRows()).toHaveLength(1);
+    expect(await counts()).toEqual({ transactions: 1, ledger: 2, outbox: 4 });
+    expect(await walletRow(walletId)).toEqual({ balance: '75.00', version: 2 });
+  });
+
+  test('same messageId with another payloadHash → IdempotencyConflictError; nothing written', async () => {
+    const walletId = await createWallet();
+    await useCase.execute({ ...command(walletId), inbox: receipt() });
+    const before = await counts();
+
+    const attempt = useCase.execute({
+      ...command(walletId, { externalTransactionId: 'bet-2' }),
+      inbox: receipt({ payloadHash: 'b'.repeat(64) }),
+    });
+
+    await expect(attempt).rejects.toBeInstanceOf(IdempotencyConflictError);
+    expect(await inboxRows()).toHaveLength(1);
+    expect(await counts()).toEqual(before);
+  });
+
+  test('two parallel calls with the same receipt → one ledger effect and both resolve', async () => {
+    const walletId = await createWallet();
+    const cmd = { ...command(walletId), inbox: receipt() };
+
+    const results = await Promise.all([useCase.execute(cmd), useCase.execute(cmd)]);
+
+    expect(results.filter((r) => r.idempotentReplay)).toHaveLength(1);
+    expect(await inboxRows()).toHaveLength(1);
+    expect(await counts()).toEqual({ transactions: 1, ledger: 2, outbox: 4 });
+    expect(await walletRow(walletId)).toEqual({ balance: '75.00', version: 2 });
+  });
+
+  test('when the outbox insert fails, no inbox row remains', async () => {
+    const walletId = await createWallet();
+    const failingOutbox: Pick<OutboxRepository, 'enqueue'> = {
+      enqueue: () => Promise.reject(new Error('outbox unavailable')),
+    };
+    const broken = await createTestApp({}, (builder) =>
+      builder.overrideProvider(OUTBOX_REPOSITORY).useValue(failingOutbox),
+    );
+    try {
+      const attempt = broken.app
+        .get(ProcessWagerTransactionUseCase)
+        .execute({ ...command(walletId), inbox: receipt() });
+
+      await expect(attempt).rejects.toThrow('outbox unavailable');
+      expect(await inboxRows()).toHaveLength(0);
+    } finally {
+      await broken.close();
+    }
   });
 });
 

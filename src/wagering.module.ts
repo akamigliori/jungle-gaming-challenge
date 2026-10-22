@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { CLOCK, type Clock } from './application/ports/clock';
 import { ID_GENERATOR, type IdGenerator } from './application/ports/id-generator';
+import { INBOX_REPOSITORY, type InboxRepository } from './application/ports/inbox.repository';
 import { LEDGER_REPOSITORY, type LedgerRepository } from './application/ports/ledger.repository';
 import { OUTBOX_REPOSITORY, type OutboxRepository } from './application/ports/outbox.repository';
 import { TRANSACTION_RUNNER, type TransactionRunner } from './application/ports/transaction-runner';
@@ -30,6 +31,7 @@ import { WageringController } from './interfaces/http/wagering/wagering.controll
         WALLET_REPOSITORY,
         WAGER_TRANSACTION_REPOSITORY,
         LEDGER_REPOSITORY,
+        INBOX_REPOSITORY,
         OUTBOX_REPOSITORY,
         ID_GENERATOR,
         CLOCK,
@@ -39,6 +41,7 @@ import { WageringController } from './interfaces/http/wagering/wagering.controll
         wallets: WalletRepository,
         transactions: WagerTransactionRepository,
         ledger: LedgerRepository,
+        inbox: InboxRepository,
         outbox: OutboxRepository,
         ids: IdGenerator,
         clock: Clock,
@@ -48,6 +51,7 @@ import { WageringController } from './interfaces/http/wagering/wagering.controll
           wallets,
           transactions,
           ledger,
+          inbox,
           outbox,
           ids,
           clock,
