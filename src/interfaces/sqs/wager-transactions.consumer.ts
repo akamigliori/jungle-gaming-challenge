@@ -19,6 +19,7 @@ import {
 } from '../../application/wager/process-wager-transaction.use-case';
 import type { WagerTransactionKind } from '../../domain/wager/wager-transaction-kind';
 import { APP_CONFIG, type AppConfig } from '../../infrastructure/config/config';
+import { safeError } from '../../infrastructure/logging/safe-error';
 import { SQS_CLIENT } from '../../infrastructure/sqs/sqs.client';
 import { failureAction } from './message-failure-policy';
 import { messageHash, parseWagerMessage, type WagerMessage } from './wager-message.schema';
@@ -98,7 +99,7 @@ export class WagerTransactionsConsumer
         await this.processBatch(messages, urls);
       } catch (error) {
         if (this.stopping) return;
-        this.logger.error({ err: error }, 'wager transactions receive cycle failed');
+        this.logger.error({ err: safeError(error) }, 'wager transactions receive cycle failed');
         await delay(RECEIVE_ERROR_BACKOFF_MS, undefined, { signal: this.stop.signal }).catch(
           () => undefined,
         );
@@ -150,7 +151,10 @@ export class WagerTransactionsConsumer
     try {
       return await this.dispatch(message, urls, context);
     } catch (error) {
-      this.logger.error({ ...context, err: error }, 'wager message sqs operation failed');
+      this.logger.error(
+        { ...context, err: safeError(error) },
+        'wager message sqs operation failed',
+      );
       return false;
     }
   }
@@ -212,7 +216,7 @@ export class WagerTransactionsConsumer
       }),
     );
     this.logger.warn(
-      { ...context, err: error, retryInSeconds: action.delaySeconds },
+      { ...context, err: safeError(error), retryInSeconds: action.delaySeconds },
       'wager message will be retried',
     );
     return false;
