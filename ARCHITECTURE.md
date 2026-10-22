@@ -54,6 +54,7 @@ src/
 | `PLAYER_MISMATCH` | player não é dono da wallet | corrigir |
 | `INSUFFICIENT_FUNDS` | aposta sem saldo | desistir |
 | `REVERSAL_INSUFFICIENT_FUNDS` | reversão levaria o saldo a negativo | escalar/desistir |
+| `BALANCE_LIMIT_EXCEEDED` | crédito levaria o saldo além do máximo de `NUMERIC(20,2)` | escalar/desistir |
 | `REFERENCE_REQUIRED` | `REFUND`/`ROLLBACK` sem referência | corrigir |
 | `REFERENCE_NOT_FOUND` | referência não chegou dentro do limite de espera | desistir/investigar |
 | `REFERENCE_MISMATCH` | referência de outro player/wallet/rodada/moeda | corrigir |
@@ -82,7 +83,7 @@ Códigos usados apenas na API HTTP (não são `failureCode` de transação): `WA
 - **Gravados como `REJECTED`** — auditáveis, devolvidos em replay com `idempotentReplay: true` e
   publicados como `WagerTransactionRejected`: todos os demais códigos de negócio
   (`CURRENCY_MISMATCH`, `PLAYER_MISMATCH`, `INSUFFICIENT_FUNDS`, `REVERSAL_INSUFFICIENT_FUNDS`,
-  `REFERENCE_*`, `INVALID_REFERENCE_KIND`, `ALREADY_REVERSED`, `AMOUNT_MISMATCH`).
+  `BALANCE_LIMIT_EXCEEDED`, `REFERENCE_*`, `INVALID_REFERENCE_KIND`, `ALREADY_REVERSED`, `AMOUNT_MISMATCH`).
 
 ## 5. Mapeamento HTTP
 
@@ -106,13 +107,14 @@ Corpo de erro uniforme:
 ```
 
 `retryable` é `true` só para `SERVICE_UNAVAILABLE`. O filtro global (`HttpErrorFilter`) nunca
-devolve stack trace: erros `5xx` são logados com o erro completo, `4xx` são logados sem o corpo
+devolve stack trace: erros `5xx` são logados apenas com campos seguros (`safeError`), `4xx` são logados sem o corpo
 da requisição. JSON malformado e erros de validação viram `400 INVALID_PAYLOAD`; demais erros do
 parser do corpo mantêm o status original com código `INVALID_PAYLOAD` (ex.: corpo grande demais →
 `413`); falha de conexão com o banco vira `503`. Nas respostas `5xx` a mensagem é sempre genérica
 (`Internal server error` ou `Service temporarily unavailable`), mesmo quando o erro é um erro de
-domínio: o detalhe fica só no log. Uma soma de `Money` fora da faixa do `NUMERIC(20,2)` é
-`INVALID_MONEY` (`400`), nunca erro de banco.
+domínio: o detalhe fica só no log. Uma soma de `Money` fora da faixa do `NUMERIC(20,2)` nunca
+chega ao banco: `Money.add` lança erro de domínio e, num crédito, a transação é gravada como
+`REJECTED` com `BALANCE_LIMIT_EXCEEDED` (`422`).
 
 ## 6. Interpretações de regra adotadas
 
@@ -827,7 +829,7 @@ aparece). Formato: decisão, alternativas consideradas e motivo.
 | Eventos da outbox numa terceira fila, `wagering-events.fifo` (grupo = `aggregateId`, deduplicação = `eventId`) | publicar na fila de entrada | o enunciado não define o destino; misturar eventos com comandos confundiria os consumidores |
 | Nomes das filas configuráveis por variável de ambiente | nomes fixos | cada suíte de teste usa filas próprias, sem interferir nas outras nem no ambiente local |
 | Banco de testes separado (`wagering_test`) no mesmo container | um container por ambiente | isolamento sem custo extra de memória; só é criado na primeira subida do volume |
-| Keycloak num profile `auth` e as instâncias da aplicação num profile `app` | tudo sempre ativo | economizar memória; os testes reutilizam Postgres e LocalStack já no ar |
+| Keycloak num futuro profile `auth` e as instâncias da aplicação num profile `app` | tudo sempre ativo | economizar memória; os testes reutilizam Postgres e LocalStack já no ar |
 | Testes de integração usam `TEST_LOG_LEVEL` (padrão `silent`) | herdar o `LOG_LEVEL` do `.env` | quem copia `.env.example` não vê os testes cheios de log |
 
 ### Testes
@@ -866,10 +868,10 @@ aparece). Formato: decisão, alternativas consideradas e motivo.
 - O lease usa o relógio de cada instância (`Clock`), não o do banco: relógios das instâncias
   precisam estar sincronizados (NTP) com folga bem menor que o lease de 30 s. Um desvio maior só
   causa publicação duplicada (tratada pela deduplicação), nunca perda.
-- Um crédito que levaria o saldo além de `NUMERIC(20,2)` (18 dígitos inteiros) é recusado pelo
-  `Money` com `400 INVALID_MONEY`, antes de qualquer escrita. Como é um erro de entrada e não uma
-  regra de negócio avaliada, a transação não é gravada como `REJECTED`: não há linha nem evento, e
-  pelo SQS a mensagem vai para a DLQ. Na prática o limite (quase 10^18) não é alcançável.
+- Um crédito que levaria o saldo além de `NUMERIC(20,2)` (18 dígitos inteiros) é uma rejeição de
+  negócio: a transação é gravada como `REJECTED` com `BALANCE_LIMIT_EXCEEDED` (`422`), o evento é
+  publicado, o SQS recebe ack e o worker de referências pendentes a encerra como `REJECTED`. O
+  limite (quase 10^18) não é alcançável na prática.
 - As linhas publicadas da outbox nunca são removidas; falta um job de retenção.
 - Um lote reservado é publicado em sequência por wallet; se o SQS ficar lento (no pior caso cerca
   de 2,5 s por envio: 1 s para abrir a conexão mais 1,5 s esperando a resposta) e uma wallet tiver
@@ -908,7 +910,7 @@ aparece). Formato: decisão, alternativas consideradas e motivo.
   nem DDL; as migrations rodam com outro usuário.
 - **Autenticação real com Keycloak** (desenho na seção 14): client credentials por provedor,
   validação do token por JWKS no `AuthGuard` e `ProviderIdentityPort` comparando o `providerId` das
-  claims com o do corpo. O Compose já reserva o profile `auth`, com heap limitado.
+  claims com o do corpo. Entraria como um futuro profile `auth` do Compose, com heap limitado.
 - **Teste de carga** (por exemplo k6 contra as três instâncias) para medir vazão, latência e o
   tamanho certo do pool de conexões (hoje 10 por instância).
 - **Retenção da outbox**: job que apaga as linhas já publicadas depois de um prazo.

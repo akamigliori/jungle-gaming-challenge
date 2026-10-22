@@ -74,7 +74,7 @@ bun run demo
 O roteiro cria uma wallet e percorre, narrando cada passo em português: `BET`, `WIN`, replay
 idempotente (mesma resposta, mesmo `transactionId`), conflito de idempotência, saldo insuficiente,
 `REFUND` entregue antes da `BET` (fica `PENDING_REFERENCE` e o worker o resolve quando a `BET`
-chega), uma `BET` entregue pela fila SQS, reconciliação e as linhas `wagering_` de `/metrics`.
+chega), uma `BET` entregue pela fila SQS (este passo pode esperar até 40 s pelo consumer), reconciliação e as linhas `wagering_` de `/metrics`.
 Sai com código diferente de zero se algum passo não se comportar como esperado. Variáveis:
 `DEMO_BASE_URL` (padrão `http://localhost:3000`) e as mesmas `SQS_*`/`AWS_*` da aplicação.
 
@@ -136,7 +136,7 @@ vê-los, defina `TEST_LOG_LEVEL` (ex.: `TEST_LOG_LEVEL=info bun run test:integra
 | `GET /wallets/:walletId` | consulta a wallet → `200 { id, playerId, balance, version }` |
 | `GET /wallets/:walletId/ledger?cursor=&limit=` | ledger em ordem de versão, paginado (`limit` de 1 a 200, padrão 50) → `200 { items, nextCursor }` |
 | `POST /wallets/:walletId/reconciliation` | confere o saldo gravado contra o ledger → `200` sempre que a wallet existe (divergência vem no corpo: `consistent: false` e `issues`), `404 WALLET_NOT_FOUND`. Só lê: nunca corrige nada |
-| `POST /wagering/transactions` | submete `BET`, `WIN`, `LOSS`, `REFUND` ou `ROLLBACK` (header `Idempotency-Key` obrigatório) → `201` processada, `202` aguardando a referência, `422` rejeitada por regra de negócio, `409` chave reutilizada com outro payload |
+| `POST /wagering/transactions` | submete `BET`, `WIN`, `LOSS`, `REFUND` ou `ROLLBACK` (header `Idempotency-Key` obrigatório) → `201` processada, `202` aguardando a referência, `422` rejeitada por regra de negócio (ex.: `INSUFFICIENT_FUNDS`, `REVERSAL_INSUFFICIENT_FUNDS`, `BALANCE_LIMIT_EXCEEDED`), `409` chave reutilizada com outro payload |
 | `GET /wagering/transactions/:transactionId` | consulta uma transação pelo id interno → `200`, `404 NOT_FOUND` |
 | `GET /providers/:providerId/wagering/transactions/:externalTransactionId` | consulta uma transação pelo id do provedor → `200`, `404 NOT_FOUND` |
 | `GET /health/live` | processo vivo |
@@ -192,6 +192,7 @@ Os caminhos são relativos a `test/`.
 |---|---|---|
 | `Money`: escala, arredondamento e entradas inválidas | `unit/domain/money.test.ts` | `never rounds silently: 3 decimals is rejected, not rounded`; `exact decimal arithmetic`; `normalizes to 2 decimals`; `rejects %p with InvalidMoneyError` |
 | `Money`: soma fora da faixa do `NUMERIC(20,2)` é erro de domínio | `unit/domain/money.test.ts` | `add beyond the NUMERIC(20,2) range throws InvalidMoneyError instead of a database error` |
+| Crédito acima do limite do saldo é rejeição de negócio (`422 BALANCE_LIMIT_EXCEEDED`) | `unit/domain/wager-decision.test.ts`, `integration/process-wager.test.ts` | `WIN that would exceed the balance limit -> REJECTED BALANCE_LIMIT_EXCEEDED`; `REFUND whose credit would overflow NUMERIC(20,2) → REJECTED BALANCE_LIMIT_EXCEEDED` |
 | Invariantes da `Wallet` | `unit/domain/wallet.test.ts` | `debit more than balance (WAGER) throws InsufficientFundsError; balance and version unchanged`; `sequence open 100, debit 30, credit 50 → 120.00, version 3, sum of entries equals balance` |
 | Regras de `BET` | `unit/domain/wager-decision.test.ts` | `decideWager BET › debits the wallet and processes`; `insufficient funds rejects and leaves the wallet intact` |
 | Regras de `WIN` | `unit/domain/wager-decision.test.ts` | `decideWager WIN › without reference credits the wallet`; `with reference to a PROCESSED BET of the same round links it` |

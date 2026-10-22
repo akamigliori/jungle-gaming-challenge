@@ -204,7 +204,7 @@ async function run(): Promise<void> {
 
   step('Uma BET de 50.00 entregue pela fila SQS');
   await sendToQueue(walletId, `sqs-bet-${runId}`, '50.00');
-  say('mensagem enviada; aguardando o consumer...');
+  say('mensagem enviada; aguardando o consumer (pode levar até 40 s)...');
   await waitUntilProcessed(`sqs-bet-${runId}`);
   const afterSqs = await call('GET', `/wallets/${walletId}`);
   expectThat(afterSqs.body.balance.amount === '1100.00', 'consumer processou: saldo 1100.00');
