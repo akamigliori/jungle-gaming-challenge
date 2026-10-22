@@ -378,7 +378,7 @@ describe('ResolvePendingReferenceUseCase', () => {
       anotherInstance().execute(target),
     ]);
 
-    expect([...results].sort()).toEqual(['resolved', 'skipped']);
+    expect(results.map((r) => r.outcome).sort()).toEqual(['resolved', 'skipped']);
     expect(await ledgerCountOf(refund.transaction.id)).toBe(1);
     expect(await balanceOf(walletId)).toBe('100.00');
     expect(
@@ -406,7 +406,7 @@ describe('ResolvePendingReferenceUseCase', () => {
       .get(ResolvePendingReferenceUseCase)
       .execute({ transactionId: refund.transaction.id, walletId });
 
-    expect(result).toBe('rescheduled');
+    expect(result.outcome).toBe('rescheduled');
     const row = await rowOf(refund.transaction.id);
     expect(row?.status).toBe('PENDING_REFERENCE');
     expect(row?.reference_attempts).toBe(1);
@@ -424,7 +424,7 @@ describe('ResolvePendingReferenceUseCase', () => {
     const result = await t.app
       .get(ResolvePendingReferenceUseCase)
       .execute({ transactionId: bet.transaction.id, walletId });
-    expect(result).toBe('skipped');
+    expect(result).toEqual({ outcome: 'skipped' });
   });
 
   test('replay of a pending transaction resolved later returns the final state', async () => {

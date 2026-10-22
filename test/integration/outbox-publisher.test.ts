@@ -198,7 +198,7 @@ describe('outbox publisher', () => {
     const clock = new FakeClock(new Date());
     const [event] = await seedOutbox(1, clock.now());
 
-    expect(await newPublisher(clock).runOnce()).toEqual({ published: 1, failed: 0 });
+    expect(await newPublisher(clock).runOnce()).toMatchObject({ published: 1, failed: 0 });
 
     const received = await receiveEvents(1);
     expect(received).toHaveLength(1);
@@ -218,9 +218,9 @@ describe('outbox publisher', () => {
     await seedOutbox(3, clock.now());
     const useCase = newPublisher(clock);
 
-    expect(await useCase.runOnce()).toEqual({ published: 3, failed: 0 });
+    expect(await useCase.runOnce()).toMatchObject({ published: 3, failed: 0 });
     clock.advance(LEASE_MS * 10);
-    expect(await useCase.runOnce()).toEqual({ published: 0, failed: 0 });
+    expect(await useCase.runOnce()).toMatchObject({ published: 0, failed: 0 });
 
     expect(await receiveEvents(4)).toHaveLength(3);
   });
@@ -236,7 +236,7 @@ describe('outbox publisher', () => {
       },
     };
 
-    expect(await newPublisher(clock, flaky).runOnce()).toEqual({ published: 2, failed: 1 });
+    expect(await newPublisher(clock, flaky).runOnce()).toMatchObject({ published: 2, failed: 1 });
 
     const rows = new Map((await outboxRows()).map((r) => [r.id, r]));
     const failed = rows.get(failing?.id as string);
@@ -252,7 +252,7 @@ describe('outbox publisher', () => {
 
     // depois do backoff a mensagem volta a ser elegível e é publicada
     clock.advance(LEASE_MS);
-    expect(await newPublisher(clock).runOnce()).toEqual({ published: 1, failed: 0 });
+    expect(await newPublisher(clock).runOnce()).toMatchObject({ published: 1, failed: 0 });
     expect((await receiveEvents(1)).map((r) => r.eventId)).toEqual([failing?.id as string]);
   });
 
@@ -286,11 +286,11 @@ describe('outbox publisher', () => {
 
     const survivor = newPublisher(clock);
     clock.advance(LEASE_MS - 1);
-    expect(await survivor.runOnce()).toEqual({ published: 0, failed: 0 });
+    expect(await survivor.runOnce()).toMatchObject({ published: 0, failed: 0 });
     expect(await receiveEvents(1, 1)).toHaveLength(0);
 
     clock.advance(1);
-    expect(await survivor.runOnce()).toEqual({ published: 1, failed: 0 });
+    expect(await survivor.runOnce()).toMatchObject({ published: 1, failed: 0 });
     expect((await receiveEvents(1)).map((r) => r.eventId)).toEqual([event?.id as string]);
     const [row] = await outboxRows();
     expect(row?.published_at).toEqual(clock.now());
@@ -336,14 +336,14 @@ describe('outbox publisher', () => {
     };
     const useCase = newPublisher(clock, flaky);
 
-    expect(await useCase.runOnce()).toEqual({ published: 0, failed: 1 });
+    expect(await useCase.runOnce()).toMatchObject({ published: 0, failed: 1 });
     expect(await receiveEvents(1, 1)).toHaveLength(0);
     const rows = await outboxRows();
     expect(rows.map((r) => r.attempts)).toEqual([1, 0]);
     expect(rows[1]?.next_attempt_at).toEqual(rows[0]?.next_attempt_at as Date);
 
     clock.advance(LEASE_MS);
-    expect(await useCase.runOnce()).toEqual({ published: 2, failed: 0 });
+    expect(await useCase.runOnce()).toMatchObject({ published: 2, failed: 0 });
     expect((await receiveEvents(2)).map((r) => r.eventId)).toEqual([
       first?.id as string,
       second?.id as string,

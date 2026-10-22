@@ -1,3 +1,4 @@
+import type { Writable } from 'node:stream';
 import type { DynamicModule } from '@nestjs/common';
 import { LoggerModule } from 'nestjs-pino';
 import type { AppConfig } from '../config/config';
@@ -30,11 +31,17 @@ export function correlationIdFor(req: RequestLike, res: ResponseLike): string {
   return id;
 }
 
-/** Logs estruturados em JSON (pino), um por requisição, sem dados sensíveis. */
-export function createLoggerModule(cfg: AppConfig): DynamicModule {
+/**
+ * Logs estruturados em JSON (pino), um por requisição, sem dados sensíveis. `destination` troca a
+ * saída padrão (stdout), por exemplo para capturar as linhas em testes.
+ */
+export function createLoggerModule(cfg: AppConfig, destination?: Writable): DynamicModule {
   return LoggerModule.forRoot({
+    // ids ligados ao logger da requisição (`assign`) também entram na linha de conclusão
+    assignResponse: true,
     pinoHttp: {
       level: cfg.logLevel,
+      ...(destination && { stream: destination }),
       redact: ['req.headers.authorization', 'req.headers.cookie', 'req.body'],
       genReqId: (req, res) => correlationIdFor(req, res),
       // `correlationId` no topo de toda linha de log emitida durante a requisição

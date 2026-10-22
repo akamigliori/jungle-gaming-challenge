@@ -693,6 +693,22 @@ na mensagem passa pelas mesmas validações de domínio.
   valor curto e seguro) ou gerado como UUIDv7, devolvido na resposta e incluído como
   `correlationId` em todas as linhas de log da requisição. `authorization`, cookies e o corpo da
   requisição são omitidos dos logs.
+- Cada transação de aposta processada gera **uma linha de log `info`**, escrita por quem chamou o
+  caso de uso: o controller HTTP (`wager transaction processed`) ou o consumer SQS
+  (`wager message processed`). Campos: `correlationId`, `transactionId`, `walletId`, `providerId`,
+  `kind`, `status`, `failureCode` (só em `REJECTED`), `idempotentReplay` e `durationMs`; no SQS,
+  também `messageId` (id do envelope, igual ao `correlationId`), `sqsMessageId` e `receiveCount`. No
+  HTTP, `walletId` e `providerId` são ligados ao logger da requisição assim que o corpo é validado,
+  (`assignResponse`), então aparecem também na linha de erro do filtro global e na linha de
+  conclusão da requisição. Antes dessa validação (respostas `400`) só o `correlationId` existe.
+- Falhas carregam os ids disponíveis e o erro sempre reduzido por `safeError` (nome, SQLSTATE,
+  constraint e tabela; sem a query nem a stack de erros do driver). O publisher da outbox loga cada
+  mensagem que falhou com `eventId`, `eventType`, `aggregateId`, `attempts` e o erro; o worker de
+  referências pendentes loga cada item avaliado com `transactionId`, `walletId`, `providerId`,
+  `attempts` e `outcome` (`resolved`, `rejected` ou `rescheduled`).
+- **O que nunca vai para o log:** valores monetários (`money`, saldos), o corpo da requisição ou
+  da mensagem, o conteúdo dos eventos da outbox, `authorization` e cookies. Há testes de integração
+  que afirmam a ausência do valor e do corpo na saída real do pino, para HTTP e SQS.
 - `GET /health/live`: processo vivo, sem consultar dependências.
 - `GET /health/ready`: `SELECT 1` no Postgres e `GetQueueUrl` nas três filas, em paralelo, cada
   verificação com timeout de 2 s; `503` indicando qual dependência está `down`. O cliente SQS não

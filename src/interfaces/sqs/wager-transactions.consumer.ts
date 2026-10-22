@@ -24,6 +24,7 @@ import {
   LONG_POLL_TIMEOUT_MARGIN_MS,
 } from '../../infrastructure/config/config';
 import { safeError } from '../../infrastructure/logging/safe-error';
+import { wagerOutcomeFields } from '../../infrastructure/logging/wager-log';
 import { SQS_CLIENT } from '../../infrastructure/sqs/sqs.client';
 import { failureAction } from './message-failure-policy';
 import { messageHash, parseWagerMessage, type WagerMessage } from './wager-message.schema';
@@ -53,6 +54,8 @@ type HandleOutcome = { left: true } | { left: false; retryInSeconds?: number };
 /** Campos da mensagem que podem ir para o log: identificadores, nunca o payload nem valores. */
 interface MessageLogContext {
   sqsMessageId: string | undefined;
+  /** Mesmo valor de `messageId`: a entrega é o id de correlação do fluxo. */
+  correlationId?: string;
   messageId?: string;
   walletId?: string;
   providerId?: string;
@@ -237,8 +240,14 @@ export class WagerTransactionsConsumer
     }
 
     const { messageId, data } = parsed.message;
-    Object.assign(context, { messageId, walletId: data.walletId, providerId: data.providerId });
+    Object.assign(context, {
+      correlationId: messageId,
+      messageId,
+      walletId: data.walletId,
+      providerId: data.providerId,
+    });
 
+    const startedAt = performance.now();
     let result: ProcessWagerResult;
     try {
       result = await this.processWager.execute(toCommand(parsed.message));
@@ -246,12 +255,11 @@ export class WagerTransactionsConsumer
       return this.handleFailure(message, error, urls, context);
     }
 
-    await this.ack(message, urls.transactions);
+    // a duração é a do processamento; o ack não entra nela
     const { transaction, idempotentReplay } = result;
-    this.logger.info(
-      { ...context, transactionId: transaction.id, status: transaction.status, idempotentReplay },
-      'wager message processed',
-    );
+    const outcome = wagerOutcomeFields(transaction, idempotentReplay, startedAt);
+    await this.ack(message, urls.transactions);
+    this.logger.info({ ...context, ...outcome }, 'wager message processed');
     return { left: true };
   }
 

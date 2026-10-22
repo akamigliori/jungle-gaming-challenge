@@ -33,13 +33,27 @@ export interface ResolvePendingReferenceParams {
 }
 
 /**
- * `resolved`: chegou a `PROCESSED` ou `REJECTED`; `rescheduled`: continua pendente, com nova
- * tentativa agendada; `skipped`: já não estava pendente (outra instância resolveu antes).
+ * `resolved`: chegou a `PROCESSED`; `rejected`: chegou a `REJECTED`; `rescheduled`: continua
+ * pendente, com nova tentativa agendada; `skipped`: já não estava pendente (outra instância
+ * resolveu antes). Fora o `skipped`, traz o provedor e `attempts`: o contador de tentativas da
+ * transação depois desta avaliação (`reference_attempts`), qualquer que seja o resultado.
  */
-export type ResolvePendingReferenceResult = 'resolved' | 'rescheduled' | 'skipped';
+export type ResolvePendingReferenceResult =
+  | { outcome: 'skipped' }
+  | {
+      outcome: 'resolved' | 'rejected' | 'rescheduled';
+      providerId: string;
+      attempts: number;
+    };
 
 /** Mesma política de falhas transitórias do processamento de apostas: 3 execuções, base de 50 ms. */
 const TRANSIENT_RETRY = { maxAttempts: 3, baseDelayMs: 50 } as const;
+
+const PENDING_OUTCOMES = {
+  PROCESSED: 'resolved',
+  REJECTED: 'rejected',
+  PENDING_REFERENCE: 'rescheduled',
+} as const;
 
 /**
  * Reavalia uma transação `PENDING_REFERENCE` numa única transação SQL: trava a wallet, recarrega a
@@ -70,7 +84,8 @@ export class ResolvePendingReferenceUseCase {
 
       // 2. recarrega sob o lock: se outra instância já decidiu, não há o que fazer
       const tx = await transactions.findById(p.transactionId);
-      if (!tx || tx.status !== WagerTransactionStatus.PendingReference) return 'skipped';
+      if (!tx || tx.status !== WagerTransactionStatus.PendingReference)
+        return { outcome: 'skipped' };
       if (tx.walletId !== wallet.id) {
         throw new InvariantViolationError('pending transaction belongs to another wallet');
       }
@@ -98,7 +113,11 @@ export class ResolvePendingReferenceUseCase {
         correlationId: tx.id,
         persist: 'update',
       });
-      return decision.outcome === 'PENDING_REFERENCE' ? 'rescheduled' : 'resolved';
+      return {
+        outcome: PENDING_OUTCOMES[decision.outcome],
+        providerId: tx.providerId,
+        attempts: tx.referenceAttempts,
+      };
     });
   }
 }
