@@ -871,7 +871,10 @@ aparece). Formato: decisão, alternativas consideradas e motivo.
 - Um crédito que levaria o saldo além de `NUMERIC(20,2)` (18 dígitos inteiros) é uma rejeição de
   negócio: a transação é gravada como `REJECTED` com `BALANCE_LIMIT_EXCEEDED` (`422`), o evento é
   publicado, o SQS recebe ack e o worker de referências pendentes a encerra como `REJECTED`. O
-  limite (quase 10^18) não é alcançável na prática.
+  limite (quase 10^18) não é alcançável na prática. Como `REFUND` e `ROLLBACK` têm o mesmo valor
+  da `BET` original, uma reversão pendente só estoura se um crédito grande entrar entre a `BET` e
+  a resolução; esse caminho é coberto por teste unitário, não por integração, por depender dessa
+  corrida.
 - As linhas publicadas da outbox nunca são removidas; falta um job de retenção.
 - Um lote reservado é publicado em sequência por wallet; se o SQS ficar lento (no pior caso cerca
   de 2,5 s por envio: 1 s para abrir a conexão mais 1,5 s esperando a resposta) e uma wallet tiver
