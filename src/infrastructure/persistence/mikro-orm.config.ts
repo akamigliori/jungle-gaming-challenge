@@ -12,6 +12,12 @@ import { WalletSchema } from './schemas/wallet.schema';
 /** Tempo máximo para abrir uma conexão com o Postgres: falha rápido em vez de travar. */
 const CONNECTION_TIMEOUT_MS = 1500;
 
+/** Duração máxima de um comando SQL; acima disso o Postgres o cancela (SQLSTATE 57014, transitório). */
+const STATEMENT_TIMEOUT_MS = 5000;
+
+/** Tempo máximo parado dentro de uma transação aberta; acima disso o Postgres encerra a sessão. */
+const IDLE_IN_TRANSACTION_TIMEOUT_MS = 10_000;
+
 /** Configuração do MikroORM: entidades de persistência e Migrator. */
 export function createOrmConfig(cfg: AppConfig): Options {
   return {
@@ -24,7 +30,13 @@ export function createOrmConfig(cfg: AppConfig): Options {
     entities: [WalletSchema, WagerTransactionSchema, LedgerEntrySchema, OutboxSchema, InboxSchema],
     extensions: [Migrator],
     forceUtcTimezone: true,
-    driverOptions: { connection: { connectionTimeoutMillis: CONNECTION_TIMEOUT_MS } },
+    driverOptions: {
+      connection: {
+        connectionTimeoutMillis: CONNECTION_TIMEOUT_MS,
+        statement_timeout: STATEMENT_TIMEOUT_MS,
+        idle_in_transaction_session_timeout: IDLE_IN_TRANSACTION_TIMEOUT_MS,
+      },
+    },
     migrations: {
       path: join(import.meta.dir, 'migrations'),
       glob: '!(*.d).{js,ts}',

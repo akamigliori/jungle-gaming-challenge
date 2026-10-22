@@ -22,6 +22,7 @@ const TRANSIENT_SQLSTATES = new Set([
   '55P03', // lock_not_available (lock_timeout estourado)
   '40P01', // deadlock_detected
   '40001', // serialization_failure
+  '57014', // query_canceled (statement_timeout estourado)
 ]);
 
 /** Códigos de erro de rede/Postgres que indicam banco indisponível (falha transitória). */
