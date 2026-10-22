@@ -3,6 +3,7 @@ import { ConnectionException } from '@mikro-orm/core';
 import type { ArgumentsHost } from '@nestjs/common';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { z } from 'zod';
+import { TransientFailureError } from '../../../src/application/shared/retry-transient';
 import {
   InvalidMoneyError,
   InvariantViolationError,
@@ -103,6 +104,19 @@ describe('HttpErrorFilter', () => {
 
   test('database connection error → 503 retryable with Retry-After', () => {
     const c = run(new ConnectionException(new Error('connect ECONNREFUSED 127.0.0.1:5433')));
+    expect(c.status).toBe(503);
+    expect(c.headers['Retry-After']).toBeDefined();
+    expect(c.body).toEqual({
+      error: {
+        code: 'SERVICE_UNAVAILABLE',
+        message: 'Service temporarily unavailable',
+        retryable: true,
+      },
+    });
+  });
+
+  test('TransientFailureError → 503 with Retry-After, without echoing the cause', () => {
+    const c = run(new TransientFailureError(new Error('canceling statement due to lock timeout')));
     expect(c.status).toBe(503);
     expect(c.headers['Retry-After']).toBeDefined();
     expect(c.body).toEqual({
