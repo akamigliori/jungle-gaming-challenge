@@ -13,8 +13,9 @@ import { safeError } from '../logging/safe-error';
 import type { WorkerLogger } from './outbox-publisher.worker';
 
 /**
- * Wallets processadas ao mesmo tempo por ciclo. Cada item abre uma transação; com o consumer
- * usando até 8 das 10 conexões do pool, o worker fica com no máximo 2.
+ * Wallets processadas ao mesmo tempo por ciclo. Somado às 8 transações do consumer, ocupa o pool de
+ * 10 conexões: o limite reduz a disputa. Quem encontra o pool cheio espera uma conexão antes de
+ * abrir a transação, e nenhuma transação com o lock de uma wallet precisa de uma segunda conexão.
  */
 export const PENDING_REFERENCE_PARALLEL_WALLETS = 2;
 

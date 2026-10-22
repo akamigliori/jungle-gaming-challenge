@@ -50,7 +50,7 @@ export interface WagerTransactionState extends CreateWagerTransactionProps {
   processedAt?: Date;
   balanceAfter?: Money;
   walletVersionAfter?: number;
-  /** Quantas vezes a referência já foi reavaliada sem sucesso. */
+  /** Quantas reavaliações reagendaram a transação (a que desiste não conta). */
   referenceAttempts: number;
   /** Quando o worker deve tentar resolver a referência de novo (só em PENDING_REFERENCE). */
   nextReferenceAttemptAt?: Date;

@@ -234,11 +234,12 @@ ou mensagem de origem viva naquele momento, e o id liga os eventos à transaçã
 **Backoff e limite.** A espera até a próxima tentativa é `min(base × 2^tentativas, teto)`, sem
 jitter (o worker não disputa nada além do lock da wallet, e o claim já espalha o trabalho entre as
 instâncias). Com os valores padrão (`REFERENCE_RETRY_BASE_MS` 2 s, `REFERENCE_RETRY_MAX_MS` 60 s,
-`REFERENCE_MAX_ATTEMPTS` 10), as esperas são 2, 4, 8, 16, 32 e depois 60 s, e a 10ª avaliação
-desiste: cerca de **6 minutos** desde a chegada. O motivo: o provedor normalmente manda a
-referência em segundos; minutos cobrem atraso de fila e reentrega do próprio provedor sem deixar a
-transação pendente (e o jogador sem resposta) por horas. Os três valores são configuráveis, e os
-testes usam esperas de 100 a 400 ms com 3 avaliações. Ao desistir, a transação vira `REJECTED`
+`REFERENCE_MAX_ATTEMPTS` 10), as esperas são 2, 4, 8, 16, 32 e depois 60 s, e a 10ª reavaliação
+do worker desiste (a que desiste não é contada em `reference_attempts`): cerca de **6 minutos**
+desde a chegada. O motivo: o provedor normalmente manda a referência em segundos; minutos cobrem
+atraso de fila e reentrega do próprio provedor sem deixar a transação pendente (e o jogador sem
+resposta) por horas. Os três valores são configuráveis, e os testes usam esperas de 100 a 400 ms
+com 3 reavaliações. Ao desistir, a transação vira `REJECTED`
 com um código preciso:
 
 - `REFERENCE_NOT_FOUND`: a referência nunca chegou;
@@ -261,7 +262,9 @@ mesmo ciclo; se a instância morrer, as linhas voltam quando o lease vence. O le
 wallet: dentro da wallet, um item por vez, na ordem do claim; no máximo 2 wallets ao mesmo tempo
 (seção 9). Um item que falha é logado (só ids) e espera o lease; os demais seguem. Mesmo que duas
 instâncias reavaliem a mesma pendência (lease vencido, ou acordada durante um claim), o lock da
-wallet as serializa e a segunda sai no passo 2.
+wallet as serializa: se a primeira resolveu, a segunda sai no passo 2; se a primeira só reagendou,
+a segunda conta mais uma tentativa (inofensivo: no pior caso a desistência chega uma tentativa
+antes).
 
 **Como é testado** (`test/integration/pending-reference.test.ts`, Postgres e LocalStack reais, com
 o worker ligado e a política curta): `REFUND` antes da `BET` → `PROCESSED` com saldo e eventos
@@ -344,8 +347,11 @@ contra uma instância com esse pool, sem erro. Com N instâncias, N × 10 conex�
 `max_connections` do Postgres (100 por padrão).
 
 O worker de referências pendentes processa no máximo 2 wallets ao mesmo tempo (cada item é uma
-transação curta), para caber junto com as 8 transações do consumer e o tráfego HTTP; o publisher da
-outbox só usa conexão no claim e na marcação, fora de qualquer lock de wallet.
+transação curta). Somado às 8 transações do consumer, isso ocupa o pool inteiro: o limite serve
+para reduzir a disputa, não para garantir conexão livre. Quem chega com o pool cheio (HTTP,
+publisher da outbox, worker) espera uma conexão antes de abrir a transação, sem segurar lock, e
+nenhuma transação que já segura o lock de uma wallet precisa de uma segunda conexão, então a
+espera nunca vira impasse.
 
 **Pool depois de um timeout.** Um `lock_timeout` (`55P03`) cancela só o comando: a transação é
 desfeita e a conexão volta utilizável para o pool (o teste de integração que segura o lock da
@@ -637,6 +643,9 @@ na mensagem passa pelas mesmas validações de domínio.
   nos testes para limpar o banco; em produção o usuário da aplicação não deve ter permissão de
   `TRUNCATE`.
 - Autenticação ainda não implementada (ver seção 13).
+- Uma pendência cuja reavaliação falha sempre com um erro não transitório (um bug) é tentada de
+  novo a cada lease (30 s) e logada a cada vez; `reference_attempts` não cresce, então ela não
+  chega à rejeição sozinha.
 - O lease do worker de referências pendentes também usa o relógio da instância. Um desvio de
   relógio só faz duas instâncias reavaliarem a mesma pendência, o que o lock da wallet e a releitura
   da transação tornam inofensivo; no máximo uma tentativa é contada a mais.
