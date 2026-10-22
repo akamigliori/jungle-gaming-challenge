@@ -281,10 +281,11 @@ teste de que o lock é por wallet e não global: outra conexão segura o `FOR UP
 na wallet B recebe `201` em menos de 1 s. Para validar que os testes detectam a falta do lock, o
 `FOR UPDATE` foi removido manualmente numa verificação pontual: quatro dos seis testes falharam (o
 da mesma chave em duas wallets depende só da `UNIQUE`, e o do lock por wallet não depende do lock
-da aplicação). Depois de cada teste que grava pela aplicação, um helper confere em SQL que o saldo
-de cada wallet é igual à soma do seu ledger, que as versões do ledger são contínuas e que a cadeia
-de saldos fecha (o `balance_before` de cada lançamento é o `balance_after` do anterior, e o primeiro
-parte de zero) (a suíte de schema fica de fora: ela grava linhas soltas de propósito para provocar cada constraint).
+da aplicação). Depois de cada teste que grava pela aplicação, um helper confere em SQL que o
+saldo de cada wallet é igual à soma do seu ledger, que as versões do ledger são contínuas e que a
+cadeia de saldos fecha (o `balance_before` de cada lançamento é o `balance_after` do anterior, e o
+primeiro parte de zero). A suíte de schema fica de fora: ela grava linhas soltas de propósito para
+provocar cada constraint.
 
 ## 10. Idempotência e replay
 
