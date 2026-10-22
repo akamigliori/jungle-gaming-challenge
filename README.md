@@ -55,6 +55,7 @@ shutdown terminar as mensagens em andamento. O profile não sobe por padrão, pa
 | `bun run test` | testes unitários (`test/unit`, sem Docker) |
 | `bun run test:integration` | testes de integração (`test/integration`, Postgres e LocalStack reais) |
 | `bun run test:concurrency` | testes de concorrência (`test/concurrency`, requisições HTTP simultâneas contra Postgres real) |
+| `bun run test:multi-instance` | três processos da aplicação contra o mesmo Postgres e as mesmas filas, com `SIGKILL`, `SIGTERM` e reinício no meio do processamento (`test/multi-instance`); o mais pesado, rode por último e sozinho |
 | `bun run migration:up` | aplica as migrations pendentes |
 | `bun run migration:down` | reverte a última migration |
 
@@ -64,7 +65,8 @@ Use `bun run test`, e não `bun test` puro: este último também executaria os t
 
 O GitHub Actions (`.github/workflows/ci.yml`) roda em todo pull request e em todo push para
 `develop` e `main`: typecheck, lint, `check:money`, `check:architecture`, testes unitários e, com o Postgres e o
-LocalStack do `docker-compose.yml`, os testes de integração e os de concorrência.
+LocalStack do `docker-compose.yml`, os testes de integração, os de concorrência e, por último, o de
+múltiplas instâncias.
 
 ## Testes de integração
 
@@ -155,11 +157,11 @@ filtre pelo nome: `bun run test:concurrency -t "2×80.00"`.
 | 1 | a mesma aposta enviada 50 vezes em paralelo → um único débito | `same BET 50× in parallel (same key and payload) → all 201, 49 replays, one row, one DEBIT, balance 75.00`; complementado por `same key on 2 different wallets in parallel → one 201, the other 409 IDEMPOTENCY_CONFLICT, no 5xx` |
 | 2 | operações concorrentes disputando o saldo da mesma wallet (100.00 com 2 × 80.00) | `100.00 with 2×80.00 at the same time, 10 rounds → one 201, one 422 INSUFFICIENT_FUNDS, balance 20.00, one DEBIT`; complementado por `REFUND and ROLLBACK of the same BET in parallel → one 201, one 422 ALREADY_REVERSED, a single CREDIT back` |
 | 3 | wallets distintas processadas em paralelo | `10 wallets × 20 BETs of 7.00 at the same time → per wallet 14 processed, 6 INSUFFICIENT_FUNDS, balance 2.00`; complementado por `lock is per wallet: a BET on wallet B gets 201 in < 1 s while wallet A stays locked` |
-| 4 | ≥ 3 processos/instâncias simultâneos | pendente |
-| 5 | worker morto depois do commit e antes do ack | pendente |
+| 4 | ≥ 3 processos/instâncias simultâneos | `three instances with SIGKILL, SIGTERM and restart › the final state is the script's: nothing lost, nothing duplicated` (em `test/multi-instance/multi-instance.test.ts`, `bun run test:multi-instance`) |
+| 5 | worker morto depois do commit e antes do ack | `an instance that dies after COMMIT and before the ack: another one acks it without a second effect` (em `test/integration/sqs-consumer.test.ts`); complementado pelo `SIGKILL` no meio do processamento do teste com três instâncias |
 | 6 | dois publishers sobre a mesma outbox | `two concurrent publishers over 100 events -> every event received, none claimed twice, none left pending` (em `test/integration/outbox-publisher.test.ts`, `bun run test:integration`); complementado por `lease: a claimed batch that is never published is not re-claimed before the lease expires, and is published after it` |
-| 7 | `ROLLBACK` ou `REFUND` entregue antes da referência | pendente |
-| 8 | reinício do serviço com comprovação da consistência final | pendente |
+| 7 | `ROLLBACK` ou `REFUND` entregue antes da referência | `REFUND before its BET → the BET wakes it and the REFUND is PROCESSED with its events` e `chain: WIN(BET) and ROLLBACK(WIN) before the BET → both PROCESSED, in order` (em `test/integration/pending-reference.test.ts`); também no roteiro do teste com três instâncias |
+| 8 | reinício do serviço com comprovação da consistência final | o teste com três instâncias: reinicia as instâncias derrubadas por `SIGKILL` e `SIGTERM` e confere ledger, saldos, inbox, DLQ e eventos publicados |
 
 Invariante verificada depois de cada teste que grava pela aplicação (integração e concorrência):
 saldo da wallet = soma do ledger, com versões contínuas (`test/integration/support/invariants.ts`).
