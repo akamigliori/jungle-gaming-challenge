@@ -296,6 +296,74 @@ describe('ProcessWagerTransactionUseCase — new transactions', () => {
   });
 });
 
+describe('ProcessWagerTransactionUseCase — waking pending dependents', () => {
+  const refundOf = (walletId: string, reference: string) =>
+    command(walletId, {
+      externalTransactionId: `refund-of-${reference}`,
+      kind: WagerTransactionKind.Refund,
+      referenceExternalTransactionId: reference,
+    });
+
+  async function pendingRow(id: string) {
+    const [row] = await sql<{ status: string; due: boolean; reference_attempts: number }>(
+      `SELECT status, next_reference_attempt_at <= NOW() AS due, reference_attempts
+         FROM wager_transactions WHERE id = ?`,
+      [id],
+    );
+    return row;
+  }
+
+  test('REFUND before its BET → the processed BET makes the REFUND due right away', async () => {
+    const walletId = await createWallet();
+    const refund = await useCase.execute(refundOf(walletId, 'bet-1'));
+    expect(await pendingRow(refund.transaction.id)).toEqual({
+      status: 'PENDING_REFERENCE',
+      due: false,
+      reference_attempts: 0,
+    });
+
+    const bet = await useCase.execute(command(walletId));
+
+    expect(bet.transaction.status).toBe(WagerTransactionStatus.Processed);
+    expect(await pendingRow(refund.transaction.id)).toEqual({
+      status: 'PENDING_REFERENCE',
+      due: true,
+      reference_attempts: 0,
+    });
+    // acordar não gera evento: o REFUND segue só com o evento de quando ficou pendente
+    expect(await outboxTypesFor(refund.transaction.id)).toEqual([
+      'WagerTransactionPendingReference',
+    ]);
+  });
+
+  test('a REJECTED reference also wakes its dependents', async () => {
+    const walletId = await createWallet();
+    const refund = await useCase.execute(refundOf(walletId, 'bet-1'));
+
+    const bet = await useCase.execute(
+      command(walletId, { money: { amount: '150.00', currency: 'BRL' } }),
+    );
+
+    expect(bet.transaction.status).toBe(WagerTransactionStatus.Rejected);
+    expect((await pendingRow(refund.transaction.id))?.due).toBe(true);
+  });
+
+  test('a transaction that only becomes pending does not wake anyone', async () => {
+    const walletId = await createWallet();
+    const rollback = await useCase.execute(
+      command(walletId, {
+        externalTransactionId: 'rollback-1',
+        kind: WagerTransactionKind.Rollback,
+        referenceExternalTransactionId: 'refund-of-bet-1',
+      }),
+    );
+
+    await useCase.execute(refundOf(walletId, 'bet-1'));
+
+    expect((await pendingRow(rollback.transaction.id))?.due).toBe(false);
+  });
+});
+
 describe('ProcessWagerTransactionUseCase — idempotency', () => {
   test('replay with the same payload returns the original balanceAfter even after another BET', async () => {
     const walletId = await createWallet();
@@ -366,6 +434,10 @@ describe('ProcessWagerTransactionUseCase — idempotency', () => {
         hidden ? Promise.resolve(null) : real.findByIdempotencyKey(p, k),
       findByExternalId: (p, e) => (hidden ? Promise.resolve(null) : real.findByExternalId(p, e)),
       isReversed: (id) => real.isReversed(id),
+      findById: (id) => real.findById(id),
+      update: (tx) => real.update(tx),
+      wakeDependents: (p) => real.wakeDependents(p),
+      claimDuePendingReferences: (p) => real.claimDuePendingReferences(p),
     };
     const racingUseCase = buildUseCase({ transactions: racing });
     const before = await counts();

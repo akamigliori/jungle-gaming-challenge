@@ -1,20 +1,9 @@
-import type { IntegrationEvent } from '../../domain/events/integration-event';
-import { WagerTransactionPendingReference } from '../../domain/events/wager-transaction-pending-reference';
-import { WagerTransactionProcessed } from '../../domain/events/wager-transaction-processed';
-import { WagerTransactionRejected } from '../../domain/events/wager-transaction-rejected';
-import { WalletBalanceChanged } from '../../domain/events/wallet-balance-changed';
 import { InboxMessage } from '../../domain/messaging/inbox-message';
-import { OutboxMessage } from '../../domain/messaging/outbox-message';
 import { InvalidPayloadError, InvariantViolationError } from '../../domain/shared/domain-error';
 import { Money, type MoneyProps } from '../../domain/shared/money';
-import {
-  decideWager,
-  type ReferenceView,
-  type WagerDecision,
-} from '../../domain/wager/wager-decision';
+import { decideWager, type ReferenceView } from '../../domain/wager/wager-decision';
 import { OPENING_PROVIDER_ID, WagerTransaction } from '../../domain/wager/wager-transaction';
 import { WagerTransactionKind } from '../../domain/wager/wager-transaction-kind';
-import type { Wallet } from '../../domain/wallet/wallet';
 import type { Clock } from '../ports/clock';
 import type { IdGenerator } from '../ports/id-generator';
 import type { InboxReceipt, InboxRepository } from '../ports/inbox.repository';
@@ -26,6 +15,7 @@ import type { WalletRepository } from '../ports/wallet.repository';
 import { retryTransient } from '../shared/retry-transient';
 import { WalletNotFoundError } from '../wallet/wallet-errors';
 import { computePayloadHash, type WagerPayload } from './payload-hash';
+import { recordDecision } from './record-decision';
 import { IdempotencyConflictError } from './wager-errors';
 
 export interface ProcessWagerCommand {
@@ -163,13 +153,14 @@ export class ProcessWagerTransactionUseCase {
       const decision = decideWager({ tx, wallet, reference, at, entryId: ids.next() });
 
       // 5. grava o resultado (aplicado, rejeitado ou pendente) na mesma transação
-      await this.record({
+      await recordDecision(this.deps, {
         tx,
         wallet,
         decision,
         expectedVersion,
         at,
         correlationId: cmd.correlationId,
+        persist: 'insert',
       });
       return { transaction: tx, idempotentReplay: false };
     });
@@ -212,44 +203,6 @@ export class ProcessWagerTransactionUseCase {
     );
     if (!transaction) return null;
     return { transaction, alreadyReversed: await transactions.isReversed(transaction.id) };
-  }
-
-  /** Ordem de escrita: wallet → transação → ledger → outbox. */
-  private async record(p: {
-    tx: WagerTransaction;
-    wallet: Wallet;
-    decision: WagerDecision;
-    expectedVersion: number;
-    at: Date;
-    correlationId: string;
-  }): Promise<void> {
-    const { wallets, transactions, ledger, outbox, ids } = this.deps;
-    const { tx, wallet, decision } = p;
-    const entry = decision.outcome === 'PROCESSED' ? decision.entry : null;
-
-    if (entry) await wallets.save(wallet, p.expectedVersion);
-    await transactions.add(tx);
-    if (entry) await ledger.append(entry);
-
-    const context = () => ({
-      eventId: ids.next(),
-      correlationId: p.correlationId,
-      occurredAt: p.at,
-    });
-    const enqueue = (event: IntegrationEvent<unknown>) =>
-      outbox.enqueue(OutboxMessage.enqueue(event));
-    switch (decision.outcome) {
-      case 'PROCESSED':
-        await enqueue(WagerTransactionProcessed.from(tx, context()));
-        if (entry) await enqueue(WalletBalanceChanged.from(wallet, entry, context()));
-        return;
-      case 'REJECTED':
-        await enqueue(WagerTransactionRejected.from(tx, context()));
-        return;
-      case 'PENDING_REFERENCE':
-        await enqueue(WagerTransactionPendingReference.from(tx, context()));
-        return;
-    }
   }
 
   private newTransaction({ cmd, money, payloadHash }: ValidatedWager): WagerTransaction {
