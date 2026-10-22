@@ -3,6 +3,7 @@ import {
   DeleteMessageCommand,
   type Message,
   ReceiveMessageCommand,
+  type ReceiveMessageResult,
   type SQSClient,
 } from '@aws-sdk/client-sqs';
 import { LockWaitTimeoutException } from '@mikro-orm/core';
@@ -17,7 +18,10 @@ import { APP_CONFIG, type AppConfig } from '../../src/infrastructure/config/conf
 import { MikroOrmWalletRepository } from '../../src/infrastructure/persistence/repositories/mikro-orm-wallet.repository';
 import { createSqsClient, SQS_CLIENT } from '../../src/infrastructure/sqs/sqs.client';
 import { UNEXPECTED_ERROR_MAX_RECEIVES } from '../../src/interfaces/sqs/message-failure-policy';
-import { CONSUMER_NAME } from '../../src/interfaces/sqs/wager-transactions.consumer';
+import {
+  CONSUMER_NAME,
+  WagerTransactionsConsumer,
+} from '../../src/interfaces/sqs/wager-transactions.consumer';
 import { createTestApp, type OverrideProviders, type TestApp } from './support/app';
 import { resetDb, withTestDb } from './support/db';
 import { assertLedgerInvariant } from './support/invariants';
@@ -271,10 +275,8 @@ const SLOW_LOCK_MS = 1500;
 /** Visibility longo: o que voltar para a fila antes disso foi devolvido pelo consumer. */
 const LONG_VISIBILITY_TIMEOUT_SECONDS = 30;
 const SHORT_WAIT_TIME_SECONDS = 1;
-/** Long poll que ainda está aberto quando o shutdown começa. */
-const SHUTDOWN_POLL_WAIT_TIME_SECONDS = 2;
-/** Folga para o shutdown chegar ao consumer (os hooks anteriores do Nest rodam antes). */
-const SHUTDOWN_STARTED_MS = 300;
+/** Long poll longo o bastante para ainda estar aberto quando o shutdown chega ao consumer. */
+const SHUTDOWN_POLL_WAIT_TIME_SECONDS = 5;
 
 const lockTimeout = () =>
   new LockWaitTimeoutException(Object.assign(new Error('lock timeout'), { code: '55P03' }));
@@ -319,27 +321,52 @@ const swallowDeletes: OverrideProviders = (builder) =>
     },
   });
 
-/** Cliente SQS real que avisa quando o primeiro long poll é enviado. */
-function notifyFirstReceive(onReceive: () => void): OverrideProviders {
-  return (builder) =>
+/**
+ * Cliente SQS real que observa os long polls: `firstReceive` resolve quando o primeiro é enviado e
+ * `receivedDuringShutdown` conta as mensagens devolvidas por eles depois de `shuttingDown`.
+ */
+function observeReceives() {
+  const firstReceive = Promise.withResolvers<void>();
+  const state = { shuttingDown: false, receivedDuringShutdown: 0 };
+  const overrides: OverrideProviders = (builder) =>
     builder.overrideProvider(SQS_CLIENT).useFactory({
       inject: [APP_CONFIG],
       factory: (config: AppConfig): SQSClient => {
         const sqs = createSqsClient(config);
+        const send = sqs.send.bind(sqs) as (c: unknown, o?: unknown) => Promise<unknown>;
         return new Proxy(sqs, {
           get(target, property) {
             if (property !== 'send') return Reflect.get(target, property, target);
-            return (command: unknown, options?: unknown) => {
-              if (command instanceof ReceiveMessageCommand) onReceive();
-              return (target.send as (c: unknown, o?: unknown) => Promise<unknown>)(
-                command,
-                options,
-              );
+            return async (command: unknown, options?: unknown) => {
+              const isReceive = command instanceof ReceiveMessageCommand;
+              if (isReceive) firstReceive.resolve();
+              const result = await send(command, options);
+              if (isReceive && state.shuttingDown) {
+                state.receivedDuringShutdown +=
+                  (result as ReceiveMessageResult).Messages?.length ?? 0;
+              }
+              return result;
             };
           },
         });
       },
     });
+  return { overrides, firstReceive: firstReceive.promise, state };
+}
+
+/** Resolve quando o Nest chama o `beforeApplicationShutdown` do consumer (depois de ele parar). */
+function shutdownReached(app: TestApp, onShutdown: () => void): Promise<void> {
+  const consumer = app.app.get(WagerTransactionsConsumer);
+  const reached = Promise.withResolvers<void>();
+  const original = consumer.beforeApplicationShutdown.bind(consumer);
+  consumer.beforeApplicationShutdown = () => {
+    onShutdown();
+    // o original marca a parada de forma síncrona, antes de qualquer await
+    const done = original();
+    reached.resolve();
+    return done;
+  };
+  return reached.promise;
 }
 
 async function wagerRows(walletId: string) {
@@ -554,26 +581,25 @@ describe('SQS consumer — order, retries, crash and shutdown', () => {
     expect(await balanceOf(walletId)).toBe('50.00');
   });
 
-  test('shutdown lets the long poll in progress finish: a message it receives goes back visible', async () => {
+  test('a message received by the long poll during shutdown goes back visible', async () => {
     const q = await newQueues(LONG_VISIBILITY_TIMEOUT_SECONDS);
     const walletId = await createWallet();
     const data = betData(walletId);
-    const polling = Promise.withResolvers<void>();
+    const receives = observeReceives();
 
-    const stopping = await startConsumer(
-      q,
-      notifyFirstReceive(() => polling.resolve()),
-      SHUTDOWN_POLL_WAIT_TIME_SECONDS,
-    );
-    await polling.promise;
-    // a mensagem chega com o shutdown já em curso, bem antes de o long poll de 2 s vencer: ou ele a
-    // recebe e o grupo a devolve com visibilidade 0, ou o laço já parou e ela nem é recebida
+    const stopping = await startConsumer(q, receives.overrides, SHUTDOWN_POLL_WAIT_TIME_SECONDS);
+    const shutdown = shutdownReached(stopping, () => {
+      receives.state.shuttingDown = true;
+    });
+    await receives.firstReceive;
     const closing = stop(stopping);
-    await Bun.sleep(SHUTDOWN_STARTED_MS);
+    await shutdown;
+    // o consumer já parou e o long poll continua aberto: ele recebe a mensagem e o grupo a devolve
+    // com visibilidade 0, sem processá-la
     await q.send(envelope(data), { groupId: walletId });
     await closing;
 
-    // um long poll abortado poderia recebê-la sem ninguém ler: ficaria escondida por 30 s
+    expect(receives.state.receivedDuringShutdown).toBeGreaterThanOrEqual(1);
     expect(await transactionsOf(data.externalTransactionId)).toEqual([]);
     expect(await q.depth('transactions')).toBe(1);
     expect(await q.visible('transactions')).toBe(1);
