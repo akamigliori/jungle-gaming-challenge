@@ -106,6 +106,7 @@ vê-los, defina `TEST_LOG_LEVEL` (ex.: `TEST_LOG_LEVEL=info bun run test:integra
 | `SHUTDOWN_TIMEOUT_MS` | `20000` | prazo para as mensagens em andamento terminarem no desligamento; precisa ser ≥ `SQS_WAIT_TIME_SECONDS` × 1000 + 5000 |
 | `PENDING_REFERENCE_WORKER_ENABLED` | `true` | liga o worker que reavalia transações `PENDING_REFERENCE` nesta instância (`false` desliga; nos testes de integração o padrão é `false`) |
 | `PENDING_REFERENCE_POLL_INTERVAL_MS` | `1000` | intervalo entre ciclos do worker quando não há lote cheio |
+| `PENDING_REFERENCE_LEASE_MS` | `30000` | prazo da reserva de um lote de pendências; se a instância morrer, outra o assume depois disso |
 | `REFERENCE_RETRY_BASE_MS` | `2000` | primeira espera por uma referência que ainda não chegou; dobra a cada tentativa |
 | `REFERENCE_RETRY_MAX_MS` | `60000` | teto da espera entre tentativas (≥ `REFERENCE_RETRY_BASE_MS`) |
 | `REFERENCE_MAX_ATTEMPTS` | `10` | avaliações da referência antes de rejeitar (`REFERENCE_NOT_FOUND` ou `REFERENCE_NOT_PROCESSED`) |

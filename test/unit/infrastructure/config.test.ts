@@ -106,18 +106,21 @@ describe('loadConfig pending references', () => {
     const pending = loadConfig({
       PENDING_REFERENCE_WORKER_ENABLED: 'false',
       PENDING_REFERENCE_POLL_INTERVAL_MS: '50',
+      PENDING_REFERENCE_LEASE_MS: '3000',
       REFERENCE_MAX_ATTEMPTS: '3',
       REFERENCE_RETRY_BASE_MS: '100',
       REFERENCE_RETRY_MAX_MS: '400',
     }).pendingReference;
     expect(pending.enabled).toBe(false);
     expect(pending.pollIntervalMs).toBe(50);
+    expect(pending.leaseMs).toBe(3000);
     expect(pending.retry).toEqual({ baseMs: 100, maxMs: 400, maxAttempts: 3 });
   });
 
   test('invalid values are rejected', () => {
     expect(() => loadConfig({ PENDING_REFERENCE_WORKER_ENABLED: 'maybe' })).toThrow();
     expect(() => loadConfig({ REFERENCE_MAX_ATTEMPTS: '0' })).toThrow();
+    expect(() => loadConfig({ PENDING_REFERENCE_LEASE_MS: '-1' })).toThrow();
     expect(() => loadConfig({ REFERENCE_RETRY_BASE_MS: '-1' })).toThrow();
     // o teto não pode ficar abaixo da espera base
     expect(() =>

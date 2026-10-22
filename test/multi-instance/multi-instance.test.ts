@@ -63,6 +63,7 @@ function instanceEnv(): Env {
     // lease curto: o lote reservado pela instância morta volta logo para as outras
     OUTBOX_LEASE_MS: '3000',
     PENDING_REFERENCE_POLL_INTERVAL_MS: '200',
+    PENDING_REFERENCE_LEASE_MS: '3000',
     // política de referência curta e sem desistência dentro do teste
     REFERENCE_RETRY_BASE_MS: '100',
     REFERENCE_RETRY_MAX_MS: '1000',
