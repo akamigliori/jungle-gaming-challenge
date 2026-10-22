@@ -25,6 +25,8 @@ export interface TestQueues {
   receiveAll(queue: TestQueueName): Promise<Message[]>;
   /** Mensagens na fila, visíveis ou em processamento. */
   depth(queue: TestQueueName): Promise<number>;
+  /** Só as mensagens visíveis (prontas para serem recebidas). */
+  visible(queue: TestQueueName): Promise<number>;
   destroy(): Promise<void>;
 }
 
@@ -96,16 +98,11 @@ export async function createTestQueues(opts: {
       }
     },
     async depth(queue) {
-      const { Attributes: attrs } = await sqs.send(
-        new GetQueueAttributesCommand({
-          QueueUrl: urls[queue],
-          AttributeNames: ['ApproximateNumberOfMessages', 'ApproximateNumberOfMessagesNotVisible'],
-        }),
-      );
-      return (
-        Number(attrs?.ApproximateNumberOfMessages ?? 0) +
-        Number(attrs?.ApproximateNumberOfMessagesNotVisible ?? 0)
-      );
+      const counts = await countsOf(sqs, urls[queue]);
+      return counts.visible + counts.notVisible;
+    },
+    async visible(queue) {
+      return (await countsOf(sqs, urls[queue])).visible;
     },
     async destroy() {
       for (const url of Object.values(urls)) {
@@ -113,6 +110,22 @@ export async function createTestQueues(opts: {
       }
       sqs.destroy();
     },
+  };
+}
+
+async function countsOf(
+  sqs: SQSClient,
+  queueUrl: string,
+): Promise<{ visible: number; notVisible: number }> {
+  const { Attributes: attrs } = await sqs.send(
+    new GetQueueAttributesCommand({
+      QueueUrl: queueUrl,
+      AttributeNames: ['ApproximateNumberOfMessages', 'ApproximateNumberOfMessagesNotVisible'],
+    }),
+  );
+  return {
+    visible: Number(attrs?.ApproximateNumberOfMessages ?? 0),
+    notVisible: Number(attrs?.ApproximateNumberOfMessagesNotVisible ?? 0),
   };
 }
 

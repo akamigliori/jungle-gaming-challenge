@@ -1,8 +1,18 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
-import type { Message } from '@aws-sdk/client-sqs';
-import type { MikroORM } from '@mikro-orm/postgresql';
+import { DeleteMessageCommand, type Message, type SQSClient } from '@aws-sdk/client-sqs';
+import { LockWaitTimeoutException } from '@mikro-orm/core';
+import { EntityManager, type MikroORM } from '@mikro-orm/postgresql';
+import {
+  WALLET_REPOSITORY,
+  type WalletRepository,
+} from '../../src/application/ports/wallet.repository';
+import { InvariantViolationError } from '../../src/domain/shared/domain-error';
+import type { Wallet } from '../../src/domain/wallet/wallet';
+import { APP_CONFIG, type AppConfig } from '../../src/infrastructure/config/config';
+import { MikroOrmWalletRepository } from '../../src/infrastructure/persistence/repositories/mikro-orm-wallet.repository';
+import { createSqsClient, SQS_CLIENT } from '../../src/infrastructure/sqs/sqs.client';
 import { CONSUMER_NAME } from '../../src/interfaces/sqs/wager-transactions.consumer';
-import { createTestApp, type TestApp } from './support/app';
+import { createTestApp, type OverrideProviders, type TestApp } from './support/app';
 import { resetDb, withTestDb } from './support/db';
 import { assertLedgerInvariant } from './support/invariants';
 import { createTestQueues, type TestQueues } from './support/queues';
@@ -102,15 +112,15 @@ async function waitProcessed(externalTransactionId: string): Promise<void> {
   );
 }
 
-async function waitQueueEmpty(): Promise<void> {
-  await waitFor(async () => (await queues.depth('transactions')) === 0, 'empty transactions queue');
+async function waitQueueEmpty(q: TestQueues = queues): Promise<void> {
+  await waitFor(async () => (await q.depth('transactions')) === 0, 'empty transactions queue');
 }
 
 /** Drena a DLQ até `count` mensagens chegarem. */
-async function waitDeadLetters(count: number): Promise<Message[]> {
+async function waitDeadLetters(count: number, q: TestQueues = queues): Promise<Message[]> {
   const received: Message[] = [];
   await waitFor(async () => {
-    received.push(...(await queues.receiveAll('transactionsDlq')));
+    received.push(...(await q.receiveAll('transactionsDlq')));
     return received.length >= count;
   }, `${count} dead-lettered messages`);
   return received;
@@ -244,5 +254,267 @@ describe('SQS consumer', () => {
     expect(await debitsOf(walletId)).toBe(1);
     expect(await balanceOf(walletId)).toBe('75.00');
     expect(await queues.receiveAll('transactionsDlq')).toEqual([]);
+  });
+});
+
+/** Execuções do caso de uso por entrega: ele mesmo refaz até 3 vezes um erro transitório. */
+const USE_CASE_ATTEMPTS_PER_DELIVERY = 3;
+/** Lock lento o bastante para o shutdown acontecer no meio do processamento. */
+const SLOW_LOCK_MS = 1500;
+/** Visibility longo: o que voltar para a fila antes disso foi devolvido pelo consumer. */
+const LONG_VISIBILITY_TIMEOUT_SECONDS = 30;
+const SHORT_WAIT_TIME_SECONDS = 1;
+
+const lockTimeout = () =>
+  new LockWaitTimeoutException(Object.assign(new Error('lock timeout'), { code: '55P03' }));
+
+/**
+ * Repositório de wallet real com o `lockById` interceptado: `lockById(id, lock)` decide se lança,
+ * espera ou chama o lock de verdade.
+ */
+function interceptLock(
+  lockById: (walletId: string, lock: () => Promise<Wallet | null>) => Promise<Wallet | null>,
+): OverrideProviders {
+  return (builder) =>
+    builder.overrideProvider(WALLET_REPOSITORY).useFactory({
+      inject: [EntityManager],
+      factory: (em: EntityManager): WalletRepository => {
+        const real = new MikroOrmWalletRepository(em);
+        return {
+          add: (wallet) => real.add(wallet),
+          findById: (id) => real.findById(id),
+          save: (wallet, expectedVersion) => real.save(wallet, expectedVersion),
+          lockById: (id) => lockById(id, () => real.lockById(id)),
+        };
+      },
+    });
+}
+
+/** Cliente SQS real que finge confirmar o `DeleteMessage`: simula a morte entre COMMIT e ack. */
+const swallowDeletes: OverrideProviders = (builder) =>
+  builder.overrideProvider(SQS_CLIENT).useFactory({
+    inject: [APP_CONFIG],
+    factory: (config: AppConfig): SQSClient => {
+      const sqs = createSqsClient(config);
+      return new Proxy(sqs, {
+        get(target, property) {
+          if (property !== 'send') return Reflect.get(target, property, target);
+          return (command: unknown, options?: unknown) =>
+            command instanceof DeleteMessageCommand
+              ? Promise.resolve({})
+              : (target.send as (c: unknown, o?: unknown) => Promise<unknown>)(command, options);
+        },
+      });
+    },
+  });
+
+async function wagerRows(walletId: string) {
+  return sql<{ external_transaction_id: string; status: string; failure_code: string | null }>(
+    'SELECT external_transaction_id, status, failure_code FROM wager_transactions WHERE wallet_id = ? AND kind = ? ORDER BY created_at, id',
+    [walletId, 'BET'],
+  );
+}
+
+describe('SQS consumer — order, retries, crash and shutdown', () => {
+  let ownQueues: TestQueues[] = [];
+  let apps: TestApp[] = [];
+
+  async function newQueues(visibilityTimeout = VISIBILITY_TIMEOUT_SECONDS): Promise<TestQueues> {
+    const q = await createTestQueues({ visibilityTimeout, maxReceiveCount: MAX_RECEIVE_COUNT });
+    ownQueues.push(q);
+    return q;
+  }
+
+  /** Instância com o consumer ligado nas filas `q`; as mensagens já devem estar na fila. */
+  async function startConsumer(q: TestQueues, overrides?: OverrideProviders): Promise<TestApp> {
+    const app = await createTestApp(
+      {
+        SQS_CONSUMER_ENABLED: 'true',
+        SQS_TRANSACTIONS_QUEUE: q.transactions,
+        SQS_TRANSACTIONS_DLQ: q.transactionsDlq,
+        SQS_EVENTS_QUEUE: q.events,
+        // um long poll abortado no shutdown ainda pode ser atendido pelo SQS e "receber" uma
+        // mensagem que ninguém vai ler; com espera curta, isso acaba antes de os testes a
+        // devolverem à fila
+        SQS_WAIT_TIME_SECONDS: String(SHORT_WAIT_TIME_SECONDS),
+      },
+      overrides,
+    );
+    apps.push(app);
+    return app;
+  }
+
+  /** Desliga a instância no meio do teste (como um `SIGTERM`). */
+  async function stop(app: TestApp): Promise<void> {
+    apps = apps.filter((other) => other !== app);
+    await app.close();
+  }
+
+  afterEach(async () => {
+    await Promise.all(apps.map((app) => app.close()));
+    await Promise.all(ownQueues.map((q) => q.destroy()));
+    apps = [];
+    ownQueues = [];
+  });
+
+  test('a transient failure stops the wallet group: the next message waits and FIFO order holds', async () => {
+    const q = await newQueues();
+    const walletId = await createWallet('100.00');
+    const first = betData(walletId, { amount: '80.00' });
+    const second = betData(walletId, { amount: '30.00' });
+    await q.send(envelope(first), { groupId: walletId });
+    await q.send(envelope(second), { groupId: walletId });
+
+    let calls = 0;
+    await startConsumer(
+      q,
+      interceptLock(async (_id, lock) => {
+        calls += 1;
+        // a 1ª entrega esgota as tentativas do caso de uso e volta para a fila com backoff
+        if (calls <= USE_CASE_ATTEMPTS_PER_DELIVERY) throw lockTimeout();
+        return lock();
+      }),
+    );
+
+    await waitFor(async () => (await wagerRows(walletId)).length === 2, 'both bets recorded');
+    await waitQueueEmpty(q);
+    expect(await wagerRows(walletId)).toEqual([
+      {
+        external_transaction_id: first.externalTransactionId,
+        status: 'PROCESSED',
+        failure_code: null,
+      },
+      {
+        external_transaction_id: second.externalTransactionId,
+        status: 'REJECTED',
+        failure_code: 'INSUFFICIENT_FUNDS',
+      },
+    ]);
+    expect(await balanceOf(walletId)).toBe('20.00');
+  });
+
+  test('a transient failure that clears up is processed on a later delivery, without the DLQ', async () => {
+    const q = await newQueues();
+    const walletId = await createWallet();
+    const data = betData(walletId);
+    await q.send(envelope(data), { groupId: walletId });
+
+    let calls = 0;
+    await startConsumer(
+      q,
+      interceptLock(async (_id, lock) => {
+        calls += 1;
+        // as 2 primeiras entregas falham; a 3ª encontra o banco de volta
+        if (calls <= 2 * USE_CASE_ATTEMPTS_PER_DELIVERY) throw lockTimeout();
+        return lock();
+      }),
+    );
+
+    await waitProcessed(data.externalTransactionId);
+    await waitQueueEmpty(q);
+    expect(await transactionsOf(data.externalTransactionId)).toEqual([
+      { status: 'PROCESSED', wallet_id: walletId },
+    ]);
+    expect(calls).toBe(2 * USE_CASE_ATTEMPTS_PER_DELIVERY + 1);
+    expect(await balanceOf(walletId)).toBe('75.00');
+    expect(await q.receiveAll('transactionsDlq')).toEqual([]);
+  });
+
+  test('an unexpected error goes to the DLQ as INTERNAL_ERROR on the 3rd delivery', async () => {
+    const q = await newQueues();
+    const walletId = await createWallet();
+    const data = betData(walletId);
+    const message = envelope(data);
+    await q.send(message, { groupId: walletId });
+
+    let deliveries = 0;
+    await startConsumer(
+      q,
+      interceptLock(async () => {
+        // erro não transitório: o caso de uso não refaz, então cada chamada é uma entrega
+        deliveries += 1;
+        throw new InvariantViolationError('simulated bug');
+      }),
+    );
+
+    const [dead] = await waitDeadLetters(1, q);
+    expect(failureCodeOf(dead)).toBe('INTERNAL_ERROR');
+    expect(dead?.Body).toBe(JSON.stringify(message));
+    await waitQueueEmpty(q);
+    expect(deliveries).toBe(MAX_RECEIVE_COUNT);
+    expect(await transactionsOf(data.externalTransactionId)).toEqual([]);
+    expect(await inboxRows(message.messageId)).toBe(0);
+    expect(await balanceOf(walletId)).toBe('100.00');
+  });
+
+  test('an instance that dies after COMMIT and before the ack: another one acks it without a second effect', async () => {
+    const q = await newQueues();
+    const walletId = await createWallet();
+    const data = betData(walletId);
+    const message = envelope(data);
+    await q.send(message, { groupId: walletId });
+
+    const crashing = await startConsumer(q, swallowDeletes);
+    await waitProcessed(data.externalTransactionId);
+    await stop(crashing);
+    // sem ack, a mensagem continua na fila e reaparece depois do visibility timeout
+    expect(await q.depth('transactions')).toBe(1);
+
+    await startConsumer(q);
+    await waitQueueEmpty(q);
+
+    const [transaction] = await sql<{ id: string; status: string }>(
+      'SELECT id, status FROM wager_transactions WHERE provider_id = ? AND external_transaction_id = ?',
+      [PROVIDER_ID, data.externalTransactionId],
+    );
+    expect(transaction?.status).toBe('PROCESSED');
+    expect(await debitsOf(walletId)).toBe(1);
+    expect(await inboxRows(message.messageId)).toBe(1);
+    const events = await sql<{ event_type: string; n: number }>(
+      `SELECT event_type, COUNT(*)::INT AS n FROM outbox_messages
+       WHERE payload->'data'->>'transactionId' = ? GROUP BY event_type ORDER BY event_type`,
+      [transaction?.id],
+    );
+    expect(events).toEqual([
+      { event_type: 'WagerTransactionProcessed', n: 1 },
+      { event_type: 'WalletBalanceChanged', n: 1 },
+    ]);
+    expect(await balanceOf(walletId)).toBe('75.00');
+    expect(await q.receiveAll('transactionsDlq')).toEqual([]);
+  });
+
+  test('on shutdown the message in progress finishes and is acked; unstarted ones go back to the queue', async () => {
+    const q = await newQueues(LONG_VISIBILITY_TIMEOUT_SECONDS);
+    const walletId = await createWallet();
+    const inProgress = betData(walletId);
+    const unstarted = betData(walletId);
+    await q.send(envelope(inProgress), { groupId: walletId });
+    await q.send(envelope(unstarted), { groupId: walletId });
+
+    let started = 0;
+    const stopping = await startConsumer(
+      q,
+      interceptLock(async (_id, lock) => {
+        started += 1;
+        await Bun.sleep(SLOW_LOCK_MS);
+        return lock();
+      }),
+    );
+    await waitFor(() => started === 1, 'processing started');
+    await stop(stopping);
+
+    expect(started).toBe(1);
+    expect(await transactionsOf(inProgress.externalTransactionId)).toEqual([
+      { status: 'PROCESSED', wallet_id: walletId },
+    ]);
+    expect(await transactionsOf(unstarted.externalTransactionId)).toEqual([]);
+    // a em andamento recebeu ack; a não iniciada está visível bem antes dos 30 s do visibility
+    expect(await q.depth('transactions')).toBe(1);
+    expect(await q.visible('transactions')).toBe(1);
+
+    await startConsumer(q);
+    await waitProcessed(unstarted.externalTransactionId);
+    await waitQueueEmpty(q);
+    expect(await balanceOf(walletId)).toBe('50.00');
   });
 });

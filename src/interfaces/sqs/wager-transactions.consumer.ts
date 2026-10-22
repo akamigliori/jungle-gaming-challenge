@@ -31,6 +31,8 @@ const RECEIVE_ERROR_BACKOFF_MS = 1000;
 /** Folga do timeout HTTP do long poll sobre o `WaitTimeSeconds`. */
 const LONG_POLL_TIMEOUT_MARGIN_MS = 5000;
 const INVALID_PAYLOAD_CODE = 'INVALID_PAYLOAD';
+/** Visibilidade 0: a mensagem devolvida no shutdown fica disponível na hora para outra instância. */
+const RELEASE_NOW_SECONDS = 0;
 
 /** Subconjunto do logger usado pelo consumer. */
 export type ConsumerLogger = Pick<PinoLogger, 'info' | 'warn' | 'error'>;
@@ -39,6 +41,12 @@ interface QueueUrls {
   transactions: string;
   transactionsDlq: string;
 }
+
+/**
+ * Resultado de uma mensagem: saiu da fila principal (ack ou DLQ) ou ficou nela. `retryInSeconds`
+ * é o atraso aplicado a ela, quando conhecido; as seguintes do grupo recebem o mesmo.
+ */
+type HandleOutcome = { left: true } | { left: false; retryInSeconds?: number };
 
 /** Campos da mensagem que podem ir para o log: identificadores, nunca o payload nem valores. */
 interface MessageLogContext {
@@ -59,6 +67,9 @@ interface MessageLogContext {
  * COMMIT de inbox, saldo, ledger e outbox. Falha permanente vai explicitamente para a DLQ; falha
  * transitória volta para a fila com backoff (`ChangeMessageVisibility`). Nenhum estado de mensagem
  * fica em memória: o contador de tentativas é o `ApproximateReceiveCount` do SQS.
+ *
+ * Uma mensagem que não sai da fila encerra o grupo no lote: as seguintes da mesma wallet voltam
+ * para a fila sem serem processadas, para que nenhuma ultrapasse a que falhou.
  */
 @Injectable()
 export class WagerTransactionsConsumer
@@ -81,10 +92,27 @@ export class WagerTransactionsConsumer
     this.loops = Array.from({ length: this.config.consumer.loops }, () => this.receiveLoop());
   }
 
-  /** Para de receber (aborta o long poll) e espera os lotes em andamento terminarem. */
+  /**
+   * Para de receber (aborta o long poll) e espera as mensagens em andamento por até
+   * `shutdownTimeoutMs`. As recebidas e ainda não iniciadas são devolvidas à fila pelo próprio
+   * grupo (`processGroup`). Estourado o prazo, o shutdown segue: a transação aberta é desfeita
+   * quando o pool fecha e a mensagem reaparece depois do visibility timeout.
+   */
   async beforeApplicationShutdown(): Promise<void> {
     this.stop.abort();
-    await Promise.all(this.loops);
+    const { shutdownTimeoutMs } = this.config.consumer;
+    const deadline = new AbortController();
+    const finished = await Promise.race([
+      Promise.all(this.loops).then(() => true),
+      delay(shutdownTimeoutMs, false, { signal: deadline.signal }),
+    ]);
+    deadline.abort();
+    if (!finished) {
+      this.logger.warn(
+        { shutdownTimeoutMs },
+        'wager consumer shutdown timed out with messages in progress',
+      );
+    }
   }
 
   private get stopping(): boolean {
@@ -132,18 +160,48 @@ export class WagerTransactionsConsumer
     );
   }
 
+  /**
+   * Mensagens do grupo uma de cada vez. A primeira que fica na fila encerra o grupo neste lote:
+   * as seguintes voltam com o mesmo atraso dela e são recebidas de novo atrás dela, na ordem FIFO.
+   * No shutdown, as que ainda não começaram voltam na hora (visibilidade 0).
+   */
   private async processGroup(group: Message[], urls: QueueUrls): Promise<void> {
-    for (const message of group) {
-      await this.handle(message, urls);
+    for (const [index, message] of group.entries()) {
+      if (this.stopping) {
+        await this.release(group.slice(index), RELEASE_NOW_SECONDS, urls);
+        return;
+      }
+      const outcome = await this.handle(message, urls);
+      if (!outcome.left) {
+        // sem atraso conhecido (erro do SQS), as seguintes esperam o próprio visibility timeout
+        if (outcome.retryInSeconds !== undefined) {
+          await this.release(group.slice(index + 1), outcome.retryInSeconds, urls);
+        }
+        return;
+      }
+    }
+  }
+
+  /** Devolve mensagens não processadas à fila, visíveis depois de `seconds`. */
+  private async release(messages: Message[], seconds: number, urls: QueueUrls): Promise<void> {
+    for (const message of messages) {
+      try {
+        await this.changeVisibility(message, seconds, urls);
+      } catch (error) {
+        // a mensagem volta sozinha quando o visibility timeout vencer
+        this.logger.error(
+          { sqsMessageId: message.MessageId, err: safeError(error) },
+          'wager message release failed',
+        );
+      }
     }
   }
 
   /**
-   * Devolve se a mensagem saiu da fila principal (ack ou DLQ). Um erro do próprio SQS no ack,
-   * no envio para a DLQ ou na troca de visibilidade só é logado: a mensagem reaparece depois do
-   * visibility timeout e a inbox impede efeito duplicado.
+   * Um erro do próprio SQS no ack, no envio para a DLQ ou na troca de visibilidade só é logado:
+   * a mensagem reaparece depois do visibility timeout e a inbox impede efeito duplicado.
    */
-  private async handle(message: Message, urls: QueueUrls): Promise<boolean> {
+  private async handle(message: Message, urls: QueueUrls): Promise<HandleOutcome> {
     const context: MessageLogContext = {
       sqsMessageId: message.MessageId,
       receiveCount: Number(message.Attributes?.ApproximateReceiveCount ?? 1),
@@ -155,7 +213,7 @@ export class WagerTransactionsConsumer
         { ...context, err: safeError(error) },
         'wager message sqs operation failed',
       );
-      return false;
+      return { left: false };
     }
   }
 
@@ -163,7 +221,7 @@ export class WagerTransactionsConsumer
     message: Message,
     urls: QueueUrls,
     context: MessageLogContext,
-  ): Promise<boolean> {
+  ): Promise<HandleOutcome> {
     const parsed = parseWagerMessage(message.Body ?? '');
     if (!parsed.ok) {
       await this.deadLetter(message, INVALID_PAYLOAD_CODE, urls);
@@ -171,7 +229,7 @@ export class WagerTransactionsConsumer
         { ...context, failureCode: INVALID_PAYLOAD_CODE },
         'wager message dead-lettered',
       );
-      return true;
+      return { left: true };
     }
 
     const { messageId, data } = parsed.message;
@@ -190,7 +248,7 @@ export class WagerTransactionsConsumer
       { ...context, transactionId: transaction.id, status: transaction.status, idempotentReplay },
       'wager message processed',
     );
-    return true;
+    return { left: true };
   }
 
   private async handleFailure(
@@ -198,7 +256,7 @@ export class WagerTransactionsConsumer
     error: unknown,
     urls: QueueUrls,
     context: MessageLogContext,
-  ): Promise<boolean> {
+  ): Promise<HandleOutcome> {
     const action = failureAction(error, context.receiveCount);
     if (action.kind === 'dead-letter') {
       await this.deadLetter(message, action.failureCode, urls);
@@ -206,20 +264,28 @@ export class WagerTransactionsConsumer
         { ...context, failureCode: action.failureCode },
         'wager message dead-lettered',
       );
-      return true;
+      return { left: true };
     }
-    await this.sqs.send(
-      new ChangeMessageVisibilityCommand({
-        QueueUrl: urls.transactions,
-        ReceiptHandle: message.ReceiptHandle,
-        VisibilityTimeout: action.delaySeconds,
-      }),
-    );
+    await this.changeVisibility(message, action.delaySeconds, urls);
     this.logger.warn(
       { ...context, err: safeError(error), retryInSeconds: action.delaySeconds },
       'wager message will be retried',
     );
-    return false;
+    return { left: false, retryInSeconds: action.delaySeconds };
+  }
+
+  private async changeVisibility(
+    message: Message,
+    seconds: number,
+    urls: QueueUrls,
+  ): Promise<void> {
+    await this.sqs.send(
+      new ChangeMessageVisibilityCommand({
+        QueueUrl: urls.transactions,
+        ReceiptHandle: message.ReceiptHandle,
+        VisibilityTimeout: seconds,
+      }),
+    );
   }
 
   /**
