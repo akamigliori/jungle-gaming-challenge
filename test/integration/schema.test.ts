@@ -2,6 +2,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:tes
 import type { MikroORM } from '@mikro-orm/postgresql';
 import { resetDb, withTestDb } from './support/db';
 
+// Esta suíte grava linhas soltas direto em SQL para provocar cada violação de constraint; elas não
+// representam estados produzidos pela aplicação, então o invariante do ledger não é verificado aqui.
 let orm: MikroORM;
 const run = (sql: string, params: unknown[] = []) => orm.em.getConnection().execute(sql, params);
 
@@ -24,7 +26,7 @@ async function insertWallet(
   const id = o.id ?? uuid();
   await run(
     `INSERT INTO wallets (id, player_id, currency, balance, version, created_at, updated_at)
-     VALUES (?, ?, ?, ?, 1, now(), now())`,
+     VALUES (?, ?, ?, ?, 1, NOW(), NOW())`,
     [id, o.playerId ?? uuid(), o.currency ?? 'BRL', o.balance ?? '100.00'],
   );
   return id;
@@ -70,7 +72,7 @@ async function insertLedger(o: {
     `INSERT INTO wallet_ledger_entries
        (id, wallet_id, transaction_id, direction, amount, currency, balance_before, balance_after,
         wallet_version, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, now())`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
     [
       id,
       o.walletId,
@@ -106,7 +108,7 @@ describe('migration', () => {
     );
     expect(tables).toHaveLength(0);
     await migrator.up();
-    const again = await run(`SELECT count(*)::int AS n FROM wallets`);
+    const again = await run(`SELECT COUNT(*)::INT AS n FROM wallets`);
     expect(again[0]?.n).toBe(0);
   });
 });
@@ -117,7 +119,7 @@ describe('wallets', () => {
     await insertWallet({ playerId: player });
     const msg = await failure(
       `INSERT INTO wallets (id, player_id, currency, balance, version, created_at, updated_at)
-       VALUES (?, ?, 'BRL', 0, 1, now(), now())`,
+       VALUES (?, ?, 'BRL', 0, 1, NOW(), NOW())`,
       [uuid(), player],
     );
     expect(msg).toContain('wallets_player_currency_uq');
@@ -126,7 +128,7 @@ describe('wallets', () => {
   test('balance -0.01 → wallets_balance_non_negative_ck', async () => {
     const msg = await failure(
       `INSERT INTO wallets (id, player_id, currency, balance, version, created_at, updated_at)
-       VALUES (?, ?, 'BRL', -0.01, 1, now(), now())`,
+       VALUES (?, ?, 'BRL', -0.01, 1, NOW(), NOW())`,
       [uuid(), uuid()],
     );
     expect(msg).toContain('wallets_balance_non_negative_ck');
@@ -135,7 +137,7 @@ describe('wallets', () => {
   test('currency "brl" → check violation', async () => {
     const msg = await failure(
       `INSERT INTO wallets (id, player_id, currency, balance, version, created_at, updated_at)
-       VALUES (?, ?, 'brl', 0, 1, now(), now())`,
+       VALUES (?, ?, 'brl', 0, 1, NOW(), NOW())`,
       [uuid(), uuid()],
     );
     expect(msg).toContain('wallets_currency_format_ck');
@@ -284,7 +286,7 @@ describe('wager_transactions', () => {
     const w = await insertWallet();
     const done = await insertTx({ walletId: w, status: 'PROCESSED', processedAt: '2026-01-01' });
     expect(
-      await failure(`UPDATE wager_transactions SET updated_at = now() WHERE id = ?`, [done]),
+      await failure(`UPDATE wager_transactions SET updated_at = NOW() WHERE id = ?`, [done]),
     ).toContain('terminal');
     const pending = await insertTx({ walletId: w });
     expect(
@@ -296,7 +298,7 @@ describe('wager_transactions', () => {
     // transição legítima continua permitida
     await run(
       `UPDATE wager_transactions
-         SET status = 'PROCESSED', processed_at = now(), balance_after = 90, wallet_version_after = 2
+         SET status = 'PROCESSED', processed_at = NOW(), balance_after = 90, wallet_version_after = 2
        WHERE id = ?`,
       [pending],
     );
@@ -326,14 +328,14 @@ describe('wallet_ledger_entries', () => {
     const msg = await failure(
       `INSERT INTO wallet_ledger_entries
          (id, wallet_id, transaction_id, direction, amount, currency, balance_before, balance_after, wallet_version, created_at)
-       VALUES (?, ?, ?, 'CREDIT', 100, 'BRL', 0, 90, 1, now())`,
+       VALUES (?, ?, ?, 'CREDIT', 100, 'BRL', 0, 90, 1, NOW())`,
       [uuid(), w, tx],
     );
     expect(msg).toContain('ledger_arithmetic_ck');
     const debit = await failure(
       `INSERT INTO wallet_ledger_entries
          (id, wallet_id, transaction_id, direction, amount, currency, balance_before, balance_after, wallet_version, created_at)
-       VALUES (?, ?, ?, 'DEBIT', 10, 'BRL', 50, 50, 1, now())`,
+       VALUES (?, ?, ?, 'DEBIT', 10, 'BRL', 50, 50, 1, NOW())`,
       [uuid(), w, tx],
     );
     expect(debit).toContain('ledger_arithmetic_ck');
@@ -396,7 +398,7 @@ describe('wallet_ledger_entries', () => {
 describe('inbox/outbox', () => {
   test('inbox primary key is (consumer_name, message_id)', async () => {
     const ins = `INSERT INTO inbox_messages (consumer_name, message_id, payload_hash, received_at)
-                 VALUES ('c', 'm', repeat('a', 64), now())`;
+                 VALUES ('c', 'm', REPEAT('a', 64), NOW())`;
     await run(ins);
     expect(await failure(ins)).toContain('inbox_messages_pkey');
   });
@@ -404,7 +406,7 @@ describe('inbox/outbox', () => {
   test('outbox attempts negative → outbox_attempts_ck', async () => {
     const msg = await failure(
       `INSERT INTO outbox_messages (id, aggregate_id, event_type, payload, occurred_at, attempts, next_attempt_at)
-       VALUES (?, 'a', 'E', '{}', now(), -1, now())`,
+       VALUES (?, 'a', 'E', '{}', NOW(), -1, NOW())`,
       [uuid()],
     );
     expect(msg).toContain('outbox_attempts_ck');
@@ -421,7 +423,7 @@ function txSql(o: TxOpts): [string, unknown[]] {
         player_id, round_id, game_id, kind, amount, currency, reference_external_transaction_id,
         reference_transaction_id, status, failure_code, processed_at, balance_after,
         wallet_version_after, reference_attempts, created_at, updated_at)
-     VALUES (?, ?, ?, ?, repeat('a', 64), ?, ?, 'r1', 'g1', ?, ?, 'BRL', ?, ?, ?, ?, ?, ?, ?, ?, now(), now())`,
+     VALUES (?, ?, ?, ?, REPEAT('a', 64), ?, ?, 'r1', 'g1', ?, ?, 'BRL', ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
     [
       id,
       o.provider ?? 'p1',

@@ -50,6 +50,8 @@ export interface WagerTransactionState extends CreateWagerTransactionProps {
   processedAt?: Date;
   balanceAfter?: Money;
   walletVersionAfter?: number;
+  /** Quando o worker deve tentar resolver a referência de novo (só em PENDING_REFERENCE). */
+  nextReferenceAttemptAt?: Date;
 }
 
 export class WagerTransaction {
@@ -72,6 +74,7 @@ export class WagerTransaction {
   private _processedAt: Date | undefined;
   private _balanceAfter: Money | undefined;
   private _walletVersionAfter: number | undefined;
+  private _nextReferenceAttemptAt: Date | undefined;
 
   private constructor(s: WagerTransactionState) {
     this.id = s.id;
@@ -93,6 +96,7 @@ export class WagerTransaction {
     this._processedAt = s.processedAt;
     this._balanceAfter = s.balanceAfter;
     this._walletVersionAfter = s.walletVersionAfter;
+    this._nextReferenceAttemptAt = s.nextReferenceAttemptAt;
   }
 
   /** Começa em PENDING. Valida a exigência de referência por tipo. */
@@ -171,6 +175,10 @@ export class WagerTransaction {
     return this._walletVersionAfter;
   }
 
+  get nextReferenceAttemptAt(): Date | undefined {
+    return this._nextReferenceAttemptAt;
+  }
+
   markProcessed(p: {
     referenceTransactionId?: string;
     at: Date;
@@ -184,8 +192,10 @@ export class WagerTransaction {
     this._walletVersionAfter = p.walletVersionAfter;
   }
 
-  markPendingReference(): void {
+  /** A referência ainda não chegou: fica pendente até `nextAttemptAt`. */
+  markPendingReference(p: { nextAttemptAt: Date }): void {
     this.transitionTo(S.PendingReference);
+    this._nextReferenceAttemptAt = p.nextAttemptAt;
   }
 
   reject(

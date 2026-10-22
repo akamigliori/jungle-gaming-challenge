@@ -1,10 +1,10 @@
-import { ConnectionException } from '@mikro-orm/core';
 import type { ArgumentsHost, ExceptionFilter } from '@nestjs/common';
 import { Catch, HttpException, Injectable } from '@nestjs/common';
 import { InjectPinoLogger, type PinoLogger } from 'nestjs-pino';
 import { ZodError } from 'zod';
 import { DomainError } from '../../domain/shared/domain-error';
 import type { ErrorCode } from '../../domain/shared/failure-code';
+import { isConnectionError } from '../../infrastructure/persistence/pg-errors';
 import { statusFor } from './error-status-map';
 
 /** Subconjunto do logger usado pelo filtro (facilita testar sem o pino). */
@@ -26,21 +26,6 @@ interface ResolvedError {
 
 /** Segundos sugeridos ao cliente antes de reenviar após um 503. */
 const RETRY_AFTER_SECONDS = '1';
-
-/** Códigos de erro de rede/Postgres que indicam banco indisponível (falha transitória). */
-const CONNECTION_ERROR_CODES = new Set([
-  'ECONNREFUSED',
-  'ECONNRESET',
-  'ETIMEDOUT',
-  'ENOTFOUND',
-  'EAI_AGAIN',
-  '57P01', // admin_shutdown
-  '57P03', // cannot_connect_now
-  '08000',
-  '08001',
-  '08003',
-  '08006',
-]);
 
 /**
  * Filtro global: converte qualquer erro no corpo uniforme
@@ -124,12 +109,4 @@ function exposedClientErrorStatus(exception: unknown): number | null {
   const { status, expose } = exception as { status?: unknown; expose?: unknown };
   const isClientError = typeof status === 'number' && status >= 400 && status < 500;
   return isClientError && expose === true ? status : null;
-}
-
-function isConnectionError(exception: unknown): boolean {
-  if (exception instanceof ConnectionException) return true;
-  if (!(exception instanceof Error)) return false;
-  if (exception.name === 'KnexTimeoutError') return true;
-  const code = (exception as { code?: unknown }).code;
-  return typeof code === 'string' && CONNECTION_ERROR_CODES.has(code);
 }

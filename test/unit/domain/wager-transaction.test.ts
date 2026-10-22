@@ -49,13 +49,13 @@ const apply = (tx: WagerTransaction, action: string) => {
     case 'fail':
       return tx.fail('INTERNAL_ERROR', at);
     default:
-      return tx.markPendingReference();
+      return tx.markPendingReference({ nextAttemptAt: at });
   }
 };
 
 const inState = (status: S): WagerTransaction => {
   const tx = make(K.Bet);
-  if (status === S.PendingReference) tx.markPendingReference();
+  if (status === S.PendingReference) tx.markPendingReference({ nextAttemptAt: at });
   if (status === S.Processed) tx.markProcessed({ at, ...outcome });
   if (status === S.Rejected) tx.reject('INSUFFICIENT_FUNDS', at);
   if (status === S.Failed) tx.fail('INTERNAL_ERROR', at);
@@ -156,7 +156,20 @@ describe('WagerTransaction transitions', () => {
   test('PENDING_REFERENCE --markPendingReference--> throws', () => {
     const tx = inState(S.PendingReference);
     expect(tx.isTerminal()).toBe(false);
-    expect(() => tx.markPendingReference()).toThrow(InvalidTransactionStateError);
+    expect(() => tx.markPendingReference({ nextAttemptAt: at })).toThrow(
+      InvalidTransactionStateError,
+    );
+  });
+
+  test('markPendingReference records the next attempt; from PROCESSED it throws', () => {
+    const next = new Date('2026-01-01T00:00:02Z');
+    const tx = make(K.Refund, 'ext-0');
+    expect(tx.nextReferenceAttemptAt).toBeUndefined();
+    tx.markPendingReference({ nextAttemptAt: next });
+    expect(tx.nextReferenceAttemptAt).toEqual(next);
+    expect(() => inState(S.Processed).markPendingReference({ nextAttemptAt: next })).toThrow(
+      InvalidTransactionStateError,
+    );
   });
 
   test('markProcessed sets processedAt and balanceAfter; reject sets failureCode', () => {

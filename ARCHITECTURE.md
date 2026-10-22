@@ -151,7 +151,151 @@ parser do corpo mantêm o status original com código `INVALID_PAYLOAD` (ex.: co
   devolvida; a consulta busca `limit + 1` linhas para saber se há próxima página. Como a versão é
   única e crescente por wallet, novos lançamentos nunca deslocam as páginas já lidas.
 
-## 8. Autenticação
+## 8. Processamento de transações de aposta
+
+`POST /wagering/transactions` chama o `ProcessWagerTransactionUseCase`, que é o único ponto de
+entrada do processamento (o consumer SQS vai chamar o mesmo caso de uso). Antes de abrir a
+transação SQL, o comando é validado sem tocar no banco: `Money.from` (valor inválido →
+`INVALID_MONEY`), `REFUND`/`ROLLBACK` sem referência → `REFERENCE_REQUIRED`, `kind = OPENING` ou
+`providerId = 'internal'` → `INVALID_PAYLOAD` (reservados para a transação de abertura), UUIDs
+normalizados para minúsculas e cálculo do `payloadHash`.
+
+Depois, numa única transação SQL:
+
+1. `SET LOCAL lock_timeout = '2s'` e `SELECT ... FROM wallets WHERE id = $1 FOR UPDATE`. Wallet
+   inexistente → `404 WALLET_NOT_FOUND`, nada gravado.
+2. Idempotência (seção 10): replay da original, `409` ou segue.
+3. Regras de negócio (`decideWager`, função pura do domínio), na ordem: player dono da wallet
+   (`PLAYER_MISMATCH`), moeda (`CURRENCY_MISMATCH`), referência, saldo.
+4. Gravação, nesta ordem: `UPDATE` da wallet com `WHERE version = $anterior` (segunda defesa: se o
+   lock faltasse, nenhuma linha seria alterada e a transação falharia), `INSERT` da transação, do
+   lançamento no ledger e dos eventos na outbox. Rejeitada ou pendente grava só a transação e o
+   evento correspondente, sem ledger e sem mudar o saldo.
+
+### Regras por tipo
+
+| Tipo | Efeito | Referência |
+|---|---|---|
+| `BET` | débito; sem saldo → `INSUFFICIENT_FUNDS` | não aceita |
+| `WIN` | crédito | opcional; se informada, precisa ser uma `BET` |
+| `LOSS` | nenhum movimento (`PROCESSED`, sem ledger, só `WagerTransactionProcessed`) | opcional; se informada, precisa ser uma `BET` |
+| `REFUND` | crédito do valor da `BET` | obrigatória, só `BET` |
+| `ROLLBACK` | inverso da referência (desfaz `BET` com crédito, `WIN`/`REFUND` com débito); débito sem saldo → `REVERSAL_INSUFFICIENT_FUNDS` | obrigatória: `BET`, `WIN` ou `REFUND` |
+
+A referência é resolvida por `(provider_id, reference_external_transaction_id)` e verificada nesta
+ordem; a primeira regra violada decide o `failureCode`:
+
+- ainda não existe → `202 PENDING_REFERENCE` (grava `next_reference_attempt_at`);
+- de outro player, wallet, rodada ou moeda → `REFERENCE_MISMATCH`;
+- tipo não permitido pela tabela acima → `INVALID_REFERENCE_KIND` (ex.: `REFUND` de um `WIN`, ou
+  `ROLLBACK` de um `LOSS`: o `LOSS` não moveu saldo, não há o que desfazer);
+- referência não está `PROCESSED` → `REFERENCE_NOT_PROCESSED`;
+- referência já revertida → `ALREADY_REVERSED`. Vale também para `WIN`/`LOSS`: pagar o `WIN` de
+  uma aposta já estornada pagaria duas vezes;
+- só em `REFUND`/`ROLLBACK`: valor diferente do valor da referência → `AMOUNT_MISMATCH`.
+
+`WIN`/`LOSS` sem referência são aceitos sem vínculo (o provedor nem sempre informa a aposta).
+
+### HTTP
+
+| Rota | Resposta |
+|---|---|
+| `POST /wagering/transactions` (header `Idempotency-Key` obrigatório, até 255 caracteres) | `201` `PROCESSED`, `202` `PENDING_REFERENCE`, `422` `REJECTED`, `409` conflito de idempotência, `400`/`404` como na seção 5, `503` + `Retry-After` em falha transitória |
+| `GET /wagering/transactions/:transactionId` | `200` com a transação, `404 NOT_FOUND` |
+| `GET /providers/:providerId/wagering/transactions/:externalTransactionId` | `200` com a transação, `404 NOT_FOUND` |
+
+Corpo do `POST`: `{ transactionId, status, balance, idempotentReplay }`; no `422` o corpo também
+traz `error: { code, message, retryable }`. `balance` é o saldo depois da transação (em
+`REJECTED`, o saldo observado na decisão; em `PENDING_REFERENCE`, `null`). Replay devolve o mesmo
+status do original com `idempotentReplay: true` e o header `Idempotent-Replayed: true`. O valor
+recomendado para a chave é `"{providerId}:{externalTransactionId}"`, mas não é imposto. Os `GET`s
+leem direto do banco e devolvem um DTO, sem passar pelo agregado.
+
+## 9. Concorrência
+
+**Lock pessimista por wallet.** Toda transação de aposta começa com `SELECT ... FOR UPDATE` na
+linha da wallet: transações da mesma wallet entram uma de cada vez, em qualquer instância, porque o
+lock é do Postgres e não da memória do processo. Wallets diferentes não se bloqueiam. Cada
+transação trava exatamente uma wallet, então não existe ciclo de espera entre locks de wallets. Um
+deadlock improvável envolvendo os índices únicos (duas transações de wallets diferentes inserindo
+chaves cruzadas) é detectado pelo Postgres e tratado como falha transitória, como abaixo.
+
+Por que não lock otimista: o caso crítico é a *hot wallet* (muitas apostas simultâneas no mesmo
+saldo). Com versão + retry, a cada rodada só uma transação vence e as outras refazem todo o
+trabalho; sob disputa alta, o número de tentativas cresce e o retry limitado começa a devolver erro
+para requisições válidas. O lock pessimista faz as concorrentes esperarem na fila do próprio
+Postgres, sem trabalho desperdiçado. O `UPDATE ... WHERE version = $anterior` continua lá como
+segunda defesa, não como estratégia.
+
+**Espera limitada.** `SET LOCAL lock_timeout = '2s'`: ninguém espera o lock indefinidamente. Se
+estourar (`55P03`), ou em deadlock (`40P01`), serialização (`40001`) ou falha de conexão, o caso de
+uso inteiro é refeito por `retryTransient`: até 3 execuções, com espera
+`random() * 50 ms * 2^tentativa` (backoff exponencial com jitter, para que instâncias em disputa
+não tentem juntas). Refazer é seguro porque cada execução é uma transação nova e a anterior já foi
+desfeita. Esgotadas as tentativas → `503 SERVICE_UNAVAILABLE` com `Retry-After: 1`.
+
+**Pior caso de espera.** O `lock_timeout` limita *cada* espera por lock, não a transação inteira,
+e vale também para a espera num índice único (um `INSERT` que colide com uma linha ainda não
+commitada espera o outro terminar e é cancelado com `lock timeout` depois de 2 s — conferido no
+Postgres 17). Numa tentativa, há até quatro esperas: o `FOR UPDATE` da wallet e a espera no índice
+único durante o `INSERT`; se o `INSERT` violar a unicidade, a re-execução repete as duas. Isso dá
+até 4 × 2 s = 8 s por tentativa e, com 3 tentativas e o backoff (até 100 ms + 200 ms), um limite de
+**≈ 24,3 s** antes do `503`, mais uma eventual espera por conexão do pool (abaixo), que fica fora
+dessa conta. É um limite teórico: exige que toda espera estoure o tempo máximo; nos testes de
+concorrência, 200 requisições simultâneas (20 por wallet) terminam todas em cerca de 1 s.
+
+**Pool de conexões.** Cada instância usa o pool padrão do MikroORM (knex: no máximo 10 conexões).
+Requisições além disso esperam por uma conexão livre antes de abrir a transação, então essa espera
+não consome o `lock_timeout`. Os testes de concorrência disparam 200 requisições simultâneas
+contra uma instância com esse pool, sem erro. Com N instâncias, N × 10 conexões precisam caber no
+`max_connections` do Postgres (100 por padrão).
+
+**Como é testado** (`test/concurrency/wagering-races.test.ts`, requisições HTTP reais disparadas
+juntas com `Promise.all` contra Postgres real): saldo `100.00` com duas apostas de `80.00` em 10
+rodadas; a mesma aposta 50 vezes em paralelo; a mesma chave em duas wallets; `REFUND` e `ROLLBACK`
+da mesma `BET` ao mesmo tempo; 10 wallets com 20 apostas cada. Além das respostas HTTP, os testes
+conferem no banco o saldo, o ledger, as transações gravadas e os eventos na outbox. Há ainda um teste de que o lock é por
+wallet e não global: outra conexão segura o `FOR UPDATE` da wallet A e, enquanto isso, uma aposta
+na wallet B recebe `201` em menos de 1 s. Para validar que os testes detectam a falta do lock, o
+`FOR UPDATE` foi removido manualmente numa verificação pontual: quatro dos seis testes falharam (o
+da mesma chave em duas wallets depende só da `UNIQUE`, e o do lock por wallet não depende do lock
+da aplicação). Depois de
+cada teste que grava pela aplicação, um helper confere em SQL que o saldo de cada wallet é igual à
+soma do seu ledger e que as versões do ledger são contínuas (a suíte de schema fica de fora: ela
+grava linhas soltas de propósito para provocar cada constraint).
+
+## 10. Idempotência e replay
+
+- **Consultada depois do lock.** A busca por `(provider_id, idempotency_key)` acontece com a wallet
+  já travada: duplicatas concorrentes da mesma wallet esperam na fila do lock e, quando entram, a
+  original já foi commitada e é encontrada. Mesmo payload (`payloadHash`) → replay; payload
+  diferente → `409 IDEMPOTENCY_CONFLICT`. O mesmo `externalTransactionId` com outra chave também
+  é `409`.
+- **Garantia final no schema.** `wager_tx_provider_idem_uq`, `wager_tx_provider_external_uq` e
+  `wager_tx_single_reversal_uq` são `UNIQUE`. O lock não cobre a mesma chave enviada para wallets
+  diferentes (cada uma trava a sua): nesse caso o segundo `INSERT` espera o primeiro commitar e
+  recebe a violação de unicidade. A transação é desfeita e o caso de uso roda **mais uma vez**; na
+  segunda execução a consulta encontra a original e a resposta é a mesma de uma requisição
+  sequencial (replay ou `409`). Uma repetição basta, porque depois do commit da original a
+  consulta sempre a enxerga.
+- **Replay devolve o resultado original.** Transações terminais (`PROCESSED`, `REJECTED`) nunca
+  mudam: o replay devolve o mesmo status, o mesmo `failureCode` e o `balance` gravado na época,
+  mesmo que o saldo tenha mudado depois. Uma transação `PENDING_REFERENCE` devolve o seu estado
+  atual (`202` enquanto pendente); quando o processamento das pendências existir e a resolver, o
+  replay passa a devolver o resultado final. O replay nunca tenta resolver a referência na hora.
+- **Falha no COMMIT.** Se a conexão cai durante o `COMMIT`, o cliente não sabe se a transação foi
+  gravada. Se não foi, o reenvio processa normalmente; se foi, o reenvio encontra a original e
+  devolve um replay. Em qualquer caso existe exatamente um efeito no saldo e no ledger.
+
+## 11. Ordem dos eventos
+
+Os eventos entram na outbox na mesma transação SQL do saldo e do ledger, então nenhum evento é
+publicado antes do commit. A ordem de publicação por wallet é **melhor esforço**: com vários
+publishers e retries, eventos da mesma wallet podem sair fora de ordem. Por isso
+`WalletBalanceChanged` carrega `walletVersion`, que o consumidor usa para ordenar ou descartar
+eventos antigos. A garantia final de ordem é o `wallet_version` do ledger, não a fila.
+
+## 12. Autenticação
 
 Hoje não há autenticação: o `AuthGuard` global é um no-op que libera todas as requisições. Ele é o
 ponto de extensão explícito para integrar um IdP externo, junto com o contrato
@@ -169,7 +313,7 @@ Os endpoints de health (`/health/live`, `/health/ready`) são marcados com `@Pub
 abertos. Mensagens da fila são tratadas como canal interno confiável, mas a identidade do provedor
 na mensagem passa pelas mesmas validações de domínio.
 
-## 9. Observabilidade e health checks
+## 13. Observabilidade e health checks
 
 - Logs JSON (pino) com uma linha por requisição. O header `x-correlation-id` é aceito (se for um
   valor curto e seguro) ou gerado como UUIDv7, devolvido na resposta e incluído como
@@ -180,24 +324,28 @@ na mensagem passa pelas mesmas validações de domínio.
   verificação com timeout de 2 s; `503` indicando qual dependência está `down`. O cliente SQS não
   faz retry interno e tem timeout de conexão e de requisição, para não travar a verificação.
 
-## 10. Limitações conhecidas
+## 14. Limitações conhecidas
 
 - `TRUNCATE` não dispara os triggers de linha que tornam o ledger append-only. Ele é usado apenas
   nos testes para limpar o banco; em produção o usuário da aplicação não deve ter permissão de
   `TRUNCATE`.
-- Autenticação ainda não implementada (ver seção 8).
+- Autenticação ainda não implementada (ver seção 12).
+- Transações `PENDING_REFERENCE` são gravadas e respondidas com `202`, mas ainda não há um
+  processo que as reprocesse quando a referência chega.
 - `@mikro-orm/nestjs` 6.1.2 declara peer dependencies para Nest `^10 || ^11`, e o projeto roda
   Nest 12. A integração funciona e é coberta pelos testes de integração; se uma versão futura
   quebrar, a alternativa é registrar à mão um provider de `MikroORM` (`MikroORM.init` +
   `orm.close()` no shutdown), sem o módulo.
 
-## 11. Próximos passos
+## 15. Próximos passos
 
-- **Reservar o provider id `internal`**, usado pela transação `OPENING`: a validação de entrada
-  das transações de provedor deve rejeitá-lo, para que nenhum provedor externo colida com as
-  transações internas.
-- **Ordem determinística no publisher da outbox**: publicar por agregado em ordem
-  `(occurred_at, id)`, já que eventos da mesma transação compartilham o mesmo `occurred_at`.
+- **Ordem estrita de eventos por wallet**: publicar por agregado em ordem de `wallet_version`
+  (coluna de sequência na outbox e claim por agregado), em vez do melhor esforço atual.
+- **Visibility timeout do SQS maior que o pior caso do processamento**: uma mensagem pode levar
+  até ~24 s só em esperas de lock e retries, mais a espera por conexão do pool (seção 9); o
+  visibility timeout da fila de entrada precisa ser maior que isso, senão a mensagem volta a ficar
+  visível e é entregue a outro worker enquanto a primeira execução ainda roda (o que é seguro pela
+  idempotência, mas desperdiça trabalho).
 - **Revisitar `403` vs `401`** quando a autenticação real estiver ativa: hoje o filtro de erros
   traduz ambos para o código `UNAUTHORIZED`. O desejado é token inválido ou ausente → `401`, e
   token válido de um provedor diferente do `providerId` do corpo → `403`, com código próprio.
