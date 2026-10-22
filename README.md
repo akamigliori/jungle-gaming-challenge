@@ -71,6 +71,9 @@ vê-los, defina `TEST_LOG_LEVEL` (ex.: `TEST_LOG_LEVEL=info bun run test:integra
 | `TEST_DB_NAME` | `wagering_test` | banco usado pelos testes de integração |
 | `TEST_LOG_LEVEL` | `silent` | nível de log da aplicação nos testes de integração |
 | `SQS_ENDPOINT` | `http://localhost:4566` | endpoint do SQS (LocalStack) |
+| `SQS_TRANSACTIONS_QUEUE` | `wager-transactions.fifo` | nome da fila de entrada de transações |
+| `SQS_TRANSACTIONS_DLQ` | `wager-transactions-dlq.fifo` | nome da DLQ da fila de entrada |
+| `SQS_EVENTS_QUEUE` | `wagering-events.fifo` | nome da fila de eventos publicados pela outbox |
 | `AWS_REGION` | `us-east-1` | região AWS |
 | `AWS_ACCESS_KEY_ID` | `test` | credencial AWS (LocalStack aceita qualquer valor) |
 | `AWS_SECRET_ACCESS_KEY` | `test` | credencial AWS |
