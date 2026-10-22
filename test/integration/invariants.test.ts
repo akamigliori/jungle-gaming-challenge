@@ -39,7 +39,12 @@ async function insertEntry(o: {
 }
 
 /** Wallet aberta com 100.00 e depois debitada em 10.00; `betBefore`/`betAfter` permitem quebrar a cadeia. */
-async function seedWallet(betBefore: string, betAfter: string, openingBefore = '0.00') {
+async function seedWallet(
+  betBefore: string,
+  betAfter: string,
+  openingBefore = '0.00',
+  openingAfter = '100.00',
+) {
   await run(
     `INSERT INTO wallets (id, player_id, currency, balance, version, created_at, updated_at)
      VALUES (?, ?, 'BRL', 90.00, 2, NOW(), NOW())`,
@@ -53,7 +58,7 @@ async function seedWallet(betBefore: string, betAfter: string, openingBefore = '
     direction: 'CREDIT',
     amount: '100.00',
     before: openingBefore,
-    after: (Number(openingBefore) + 100).toFixed(2),
+    after: openingAfter,
     version: 1,
   });
   await insertEntry({
@@ -89,7 +94,7 @@ describe('assertLedgerInvariant', () => {
   });
 
   test('primeira entrada com balance_before diferente de zero é divergência', async () => {
-    await seedWallet('150.00', '140.00', '50.00');
+    await seedWallet('150.00', '140.00', '50.00', '150.00');
     await expect(assertLedgerInvariant(orm)).rejects.toThrow('ledger invariant violated');
   });
 });
