@@ -35,6 +35,7 @@ import { IdempotencyConflictError } from '../../src/application/wager/wager-erro
 import { CreateWalletUseCase } from '../../src/application/wallet/create-wallet.use-case';
 import { WalletNotFoundError } from '../../src/application/wallet/wallet-errors';
 import { InvalidPayloadError } from '../../src/domain/shared/domain-error';
+import { DEFAULT_REFERENCE_RETRY } from '../../src/domain/wager/reference-retry';
 import { ReferenceRequiredError } from '../../src/domain/wager/wager-errors';
 import { WagerTransactionKind } from '../../src/domain/wager/wager-transaction-kind';
 import { WagerTransactionStatus } from '../../src/domain/wager/wager-transaction-status';
@@ -133,6 +134,7 @@ function buildUseCase(over: Partial<ProcessWagerDeps>): ProcessWagerTransactionU
     clock: t.app.get<Clock>(CLOCK),
     isTransient: isTransientDbError,
     isUniqueViolation: isWagerUniqueViolation,
+    referenceRetry: DEFAULT_REFERENCE_RETRY,
     ...over,
   });
 }
@@ -435,7 +437,7 @@ describe('ProcessWagerTransactionUseCase — idempotency', () => {
       findByExternalId: (p, e) => (hidden ? Promise.resolve(null) : real.findByExternalId(p, e)),
       isReversed: (id) => real.isReversed(id),
       findById: (id) => real.findById(id),
-      update: (tx) => real.update(tx),
+      update: (tx, at) => real.update(tx, at),
       wakeDependents: (p) => real.wakeDependents(p),
       claimDuePendingReferences: (p) => real.claimDuePendingReferences(p),
     };

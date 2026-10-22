@@ -33,9 +33,10 @@ export interface WagerTransactionRepository {
 
   /**
    * Grava o novo estado de uma transação que estava `PENDING_REFERENCE` (reagendada ou
-   * resolvida). Se a linha não estiver mais pendente, lança `InvariantViolationError`.
+   * resolvida); `at` é o instante da decisão e vira o `updated_at`. Se a linha não estiver mais
+   * pendente, lança `InvariantViolationError`.
    */
-  update(tx: WagerTransaction): Promise<void>;
+  update(tx: WagerTransaction, at: Date): Promise<void>;
 
   /**
    * Antecipa para `now` a próxima tentativa das transações pendentes da mesma wallet e provedor

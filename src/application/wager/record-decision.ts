@@ -47,7 +47,7 @@ export async function recordDecision(
 
   if (entry) await wallets.save(wallet, p.expectedVersion);
   if (p.persist === 'insert') await transactions.add(tx);
-  else await transactions.update(tx);
+  else await transactions.update(tx, p.at);
   if (entry) await ledger.append(entry);
 
   const context = () => ({ eventId: ids.next(), correlationId: p.correlationId, occurredAt: p.at });

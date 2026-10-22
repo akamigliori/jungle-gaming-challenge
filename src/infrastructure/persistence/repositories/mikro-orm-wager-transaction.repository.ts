@@ -64,7 +64,7 @@ export class MikroOrmWagerTransactionRepository implements WagerTransactionRepos
    * que nunca sobrescrevemos uma decisão já tomada; 0 linhas significa que o chamador trabalhou
    * sobre um estado velho, o que o lock da wallet deveria ter impedido.
    */
-  async update(tx: WagerTransaction): Promise<void> {
+  async update(tx: WagerTransaction, at: Date): Promise<void> {
     const record = toRecord(tx);
     const affected = await this.em.nativeUpdate(
       WagerTransactionSchema,
@@ -78,7 +78,7 @@ export class MikroOrmWagerTransactionRepository implements WagerTransactionRepos
         balanceAfter: record.balanceAfter,
         walletVersionAfter: record.walletVersionAfter,
         processedAt: record.processedAt,
-        updatedAt: tx.processedAt ?? new Date(),
+        updatedAt: at,
       },
     );
     if (affected !== 1) {
@@ -130,6 +130,7 @@ export class MikroOrmWagerTransactionRepository implements WagerTransactionRepos
         [now, limit],
       );
       if (due.length > 0) {
+        // o lease é coordenação entre instâncias, não mudança de negócio: não toca em `updated_at`
         await em.execute(
           'UPDATE wager_transactions SET next_reference_attempt_at = ? WHERE id IN (?)',
           [leaseUntil, due.map((row) => row.id)],

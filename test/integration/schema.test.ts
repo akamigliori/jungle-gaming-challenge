@@ -125,10 +125,14 @@ describe('migration', () => {
     );
     expect(created).toContain('PENDING_REFERENCE');
 
+    // alvo explícito: um `down()` sem argumento desfaria a migration mais nova, qualquer que fosse
+    const migration = {
+      migrations: ['Migration20261021000000_pending_reference_dependents_index'],
+    };
     const migrator = orm.getMigrator();
-    await migrator.down();
+    await migrator.down(migration);
     expect(await indexDef()).toBeUndefined();
-    await migrator.up();
+    await migrator.up(migration);
     expect(await indexDef()).toBe(created);
   });
 });

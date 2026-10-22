@@ -18,8 +18,8 @@ export type OverrideProviders = (builder: TestingModuleBuilder) => TestingModule
  * Sobe a aplicação real numa porta livre, apontando para o banco `wagering_test`.
  * `overrides` troca variáveis de ambiente sem alterar `process.env`; `overrideProviders`
  * troca providers do container de DI. Logs ficam silenciosos, a menos que `TEST_LOG_LEVEL` seja
- * definido (o `LOG_LEVEL` do `.env` é ignorado aqui). O publisher da outbox e o consumer SQS ficam
- * desligados, a menos que `overrides` os liguem.
+ * definido (o `LOG_LEVEL` do `.env` é ignorado aqui). O publisher da outbox, o consumer SQS e o worker
+ * de referências pendentes ficam desligados, a menos que `overrides` os liguem.
  */
 export async function createTestApp(
   overrides: Partial<Env> = {},
@@ -33,6 +33,8 @@ export async function createTestApp(
     OUTBOX_PUBLISHER_ENABLED: 'false',
     // o consumer leria a fila padrão do ambiente local; a suíte do consumer liga com filas próprias
     SQS_CONSUMER_ENABLED: 'false',
+    // o worker resolveria pendências que as suítes conferem paradas; quem precisa liga
+    PENDING_REFERENCE_WORKER_ENABLED: 'false',
     ...overrides,
   });
   const app = overrideProviders

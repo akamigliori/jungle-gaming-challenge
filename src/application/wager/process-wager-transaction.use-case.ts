@@ -1,7 +1,8 @@
 import { InboxMessage } from '../../domain/messaging/inbox-message';
 import { InvalidPayloadError, InvariantViolationError } from '../../domain/shared/domain-error';
 import { Money, type MoneyProps } from '../../domain/shared/money';
-import { decideWager, type ReferenceView } from '../../domain/wager/wager-decision';
+import type { ReferenceRetryPolicy } from '../../domain/wager/reference-retry';
+import { decideWager } from '../../domain/wager/wager-decision';
 import { OPENING_PROVIDER_ID, WagerTransaction } from '../../domain/wager/wager-transaction';
 import { WagerTransactionKind } from '../../domain/wager/wager-transaction-kind';
 import type { Clock } from '../ports/clock';
@@ -14,6 +15,7 @@ import type { WagerTransactionRepository } from '../ports/wager-transaction.repo
 import type { WalletRepository } from '../ports/wallet.repository';
 import { retryTransient } from '../shared/retry-transient';
 import { WalletNotFoundError } from '../wallet/wallet-errors';
+import { findReference } from './find-reference';
 import { computePayloadHash, type WagerPayload } from './payload-hash';
 import { recordDecision } from './record-decision';
 import { IdempotencyConflictError } from './wager-errors';
@@ -53,6 +55,8 @@ export interface ProcessWagerDeps {
   isTransient: (error: unknown) => boolean;
   /** Violação das constraints UNIQUE das transações de aposta (corrida no INSERT). */
   isUniqueViolation: (error: unknown) => boolean;
+  /** Backoff da referência pendente: define a primeira espera de quem fica `PENDING_REFERENCE`. */
+  referenceRetry: ReferenceRetryPolicy;
 }
 
 /** Política de novas tentativas em falhas transitórias: 3 execuções, espera base de 50 ms. */
@@ -147,10 +151,17 @@ export class ProcessWagerTransactionUseCase {
 
       // 4. transação nova: regras de negócio sobre a wallet travada
       const tx = this.newTransaction(wager);
-      const reference = await this.resolveReference(cmd);
+      const reference = await findReference(this.deps.transactions, tx);
       const expectedVersion = wallet.version;
       const at = clock.now();
-      const decision = decideWager({ tx, wallet, reference, at, entryId: ids.next() });
+      const decision = decideWager({
+        tx,
+        wallet,
+        reference,
+        at,
+        entryId: ids.next(),
+        retry: this.deps.referenceRetry,
+      });
 
       // 5. grava o resultado (aplicado, rejeitado ou pendente) na mesma transação
       await recordDecision(this.deps, {
@@ -191,18 +202,6 @@ export class ProcessWagerTransactionUseCase {
       );
     }
     return null;
-  }
-
-  /** `null` quando a referência informada ainda não existe; ignorada se não houver referência. */
-  private async resolveReference(cmd: ProcessWagerCommand): Promise<ReferenceView | null> {
-    const { transactions } = this.deps;
-    if (cmd.referenceExternalTransactionId === undefined) return null;
-    const transaction = await transactions.findByExternalId(
-      cmd.providerId,
-      cmd.referenceExternalTransactionId,
-    );
-    if (!transaction) return null;
-    return { transaction, alreadyReversed: await transactions.isReversed(transaction.id) };
   }
 
   private newTransaction({ cmd, money, payloadHash }: ValidatedWager): WagerTransaction {

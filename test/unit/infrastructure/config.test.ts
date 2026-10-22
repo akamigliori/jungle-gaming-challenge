@@ -90,3 +90,38 @@ describe('loadConfig SQS consumer', () => {
     expect(() => loadConfig({})).not.toThrow();
   });
 });
+
+describe('loadConfig pending references', () => {
+  test('defaults: enabled, 1 s poll, batch of 50, 30 s lease, 2 s..60 s backoff, 10 attempts', () => {
+    expect(loadConfig({}).pendingReference).toEqual({
+      enabled: true,
+      pollIntervalMs: 1000,
+      batchSize: 50,
+      leaseMs: 30_000,
+      retry: { baseMs: 2000, maxMs: 60_000, maxAttempts: 10 },
+    });
+  });
+
+  test('values come from the environment', () => {
+    const pending = loadConfig({
+      PENDING_REFERENCE_WORKER_ENABLED: 'false',
+      PENDING_REFERENCE_POLL_INTERVAL_MS: '50',
+      REFERENCE_MAX_ATTEMPTS: '3',
+      REFERENCE_RETRY_BASE_MS: '100',
+      REFERENCE_RETRY_MAX_MS: '400',
+    }).pendingReference;
+    expect(pending.enabled).toBe(false);
+    expect(pending.pollIntervalMs).toBe(50);
+    expect(pending.retry).toEqual({ baseMs: 100, maxMs: 400, maxAttempts: 3 });
+  });
+
+  test('invalid values are rejected', () => {
+    expect(() => loadConfig({ PENDING_REFERENCE_WORKER_ENABLED: 'maybe' })).toThrow();
+    expect(() => loadConfig({ REFERENCE_MAX_ATTEMPTS: '0' })).toThrow();
+    expect(() => loadConfig({ REFERENCE_RETRY_BASE_MS: '-1' })).toThrow();
+    // o teto não pode ficar abaixo da espera base
+    expect(() =>
+      loadConfig({ REFERENCE_RETRY_BASE_MS: '500', REFERENCE_RETRY_MAX_MS: '100' }),
+    ).toThrow();
+  });
+});

@@ -321,12 +321,27 @@ describe('WagerTransactionRepository pending references', () => {
     const refund = await addPendingRefund(wallet, { external: 'refund-1', reference: 'bet-1' });
     const nextAttemptAt = inMinutes(5);
     refund.retryReferenceLater(nextAttemptAt);
-    await runner.run(() => transactions.update(refund));
+    await runner.run(() => transactions.update(refund, new Date()));
 
     const found = await runner.run(() => transactions.findById(refund.id));
     expect(found?.status).toBe(WagerTransactionStatus.PendingReference);
     expect(found?.referenceAttempts).toBe(1);
     expect(found?.nextReferenceAttemptAt?.getTime()).toBe(nextAttemptAt.getTime());
+  });
+
+  test('update stamps updated_at with the time it receives (the decision clock)', async () => {
+    const wallet = await createWallet();
+    const refund = await addPendingRefund(wallet, { external: 'refund-1', reference: 'bet-1' });
+    const at = new Date('2030-01-02T03:04:05.000Z');
+    refund.retryReferenceLater(inMinutes(5));
+    await runner.run(() => transactions.update(refund, at));
+
+    const [row] = await orm.em
+      .getConnection()
+      .execute<{ updated_at: string }[]>('SELECT updated_at FROM wager_transactions WHERE id = ?', [
+        refund.id,
+      ]);
+    expect(new Date(row?.updated_at ?? 0).getTime()).toBe(at.getTime());
   });
 
   test('update persists the terminal fields when a pending transaction resolves', async () => {
@@ -336,7 +351,7 @@ describe('WagerTransactionRepository pending references', () => {
     await transactions.add(bet);
     const refund = await addPendingRefund(wallet, { external: 'refund-1', reference: 'bet-1' });
     refund.reject('REFERENCE_NOT_FOUND', new Date());
-    await runner.run(() => transactions.update(refund));
+    await runner.run(() => transactions.update(refund, new Date()));
 
     const found = await runner.run(() => transactions.findById(refund.id));
     expect(found?.status).toBe(WagerTransactionStatus.Rejected);
@@ -350,11 +365,11 @@ describe('WagerTransactionRepository pending references', () => {
     const refund = await addPendingRefund(wallet, { external: 'refund-1', reference: 'bet-1' });
     const stale = await runner.run(() => transactions.findById(refund.id));
     refund.reject('REFERENCE_NOT_FOUND', new Date());
-    await runner.run(() => transactions.update(refund));
+    await runner.run(() => transactions.update(refund, new Date()));
 
     if (!stale) throw new Error('transaction not found');
     stale.retryReferenceLater(inMinutes(5));
-    await expect(runner.run(() => transactions.update(stale))).rejects.toBeInstanceOf(
+    await expect(runner.run(() => transactions.update(stale, new Date()))).rejects.toBeInstanceOf(
       InvariantViolationError,
     );
   });

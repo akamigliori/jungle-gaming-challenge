@@ -3,7 +3,8 @@ import { LedgerDirection } from '../wallet/ledger-direction';
 import type { Wallet } from '../wallet/wallet';
 import { InsufficientFundsError, ReversalInsufficientFundsError } from '../wallet/wallet-errors';
 import type { WalletLedgerEntry } from '../wallet/wallet-ledger-entry';
-import { DEFAULT_REFERENCE_RETRY, referenceRetryDelayMs } from './reference-retry';
+import { type ReferenceRetryPolicy, referenceRetryDelayMs } from './reference-retry';
+import { InvalidTransactionStateError } from './wager-errors';
 import type { WagerTransaction } from './wager-transaction';
 import { WagerTransactionKind as K } from './wager-transaction-kind';
 import { WagerTransactionStatus } from './wager-transaction-status';
@@ -28,22 +29,27 @@ const ALLOWED_REFERENCE_KINDS: Partial<Record<K, K[]>> = {
   [K.Rollback]: [K.Bet, K.Win, K.Refund],
 };
 
-type ReferenceCheck =
-  | { ok: true; referenceId: string | undefined }
-  | { ok: false; decision: WagerDecision };
-
-/**
- * Aplica as regras de negócio a uma transação nova, na ordem do desenho, e já muta `tx` e `wallet`.
- * Função pura: não acessa banco nem relógio; o chamador mantém a wallet travada e persiste o resultado.
- * `reference = null` significa "não encontrada"; é ignorada quando a transação não traz referência.
- */
-export function decideWager(p: {
+export interface DecideWagerParams {
   tx: WagerTransaction;
   wallet: Wallet;
   reference: ReferenceView | null;
   at: Date;
   entryId: string;
-}): WagerDecision {
+  /** Define a espera até a próxima tentativa quando a referência ainda não está disponível. */
+  retry: ReferenceRetryPolicy;
+}
+
+type ReferenceCheck =
+  | { ok: true; referenceId: string | undefined }
+  | { ok: false; decision: WagerDecision };
+
+/**
+ * Aplica as regras de negócio a uma transação nova (ou já pendente), na ordem do desenho, e já muta
+ * `tx` e `wallet`.
+ * Função pura: não acessa banco nem relógio; o chamador mantém a wallet travada e persiste o resultado.
+ * `reference = null` significa "não encontrada"; é ignorada quando a transação não traz referência.
+ */
+export function decideWager(p: DecideWagerParams): WagerDecision {
   const { tx, wallet } = p;
   if (tx.playerId !== wallet.playerId) return reject(p, 'PLAYER_MISMATCH');
   // Saldo de outra moeda não é observável na moeda da transação: rejeita sem snapshot.
@@ -58,12 +64,32 @@ export function decideWager(p: {
   return applyMovement(p, check.referenceId);
 }
 
-function checkReference(p: {
-  tx: WagerTransaction;
-  wallet: Wallet;
-  reference: ReferenceView | null;
-  at: Date;
-}): ReferenceCheck {
+/**
+ * Reavalia uma transação que já estava `PENDING_REFERENCE`, com as mesmas regras de `decideWager`.
+ * Se a referência continua indisponível, conta a tentativa e reagenda pelo backoff da política; na
+ * última tentativa desiste: `REFERENCE_NOT_PROCESSED` se a referência existe mas não terminou,
+ * `REFERENCE_NOT_FOUND` se nunca chegou.
+ */
+export function reevaluatePendingWager(p: DecideWagerParams): WagerDecision {
+  if (p.tx.status !== WagerTransactionStatus.PendingReference) {
+    throw new InvalidTransactionStateError(`cannot reevaluate a ${p.tx.status} transaction`);
+  }
+  const decision = decideWager(p);
+  if (decision.outcome !== 'PENDING_REFERENCE') return decision;
+
+  const attempt = p.tx.referenceAttempts + 1;
+  if (attempt >= p.retry.maxAttempts) {
+    return reject(p, decision.referenceFound ? 'REFERENCE_NOT_PROCESSED' : 'REFERENCE_NOT_FOUND');
+  }
+  p.tx.retryReferenceLater(nextAttemptAt(p.at, attempt, p.retry));
+  return decision;
+}
+
+function nextAttemptAt(at: Date, attempts: number, retry: ReferenceRetryPolicy): Date {
+  return new Date(at.getTime() + referenceRetryDelayMs(attempts, retry));
+}
+
+function checkReference(p: DecideWagerParams): ReferenceCheck {
   const { tx, reference } = p;
   if (!hasReference(tx)) return { ok: true, referenceId: undefined };
   if (reference === null) return { ok: false, decision: pendingReference(p, false) };
@@ -78,12 +104,11 @@ function checkReference(p: {
  * e quem reagenda (contando a tentativa) é o chamador.
  */
 function pendingReference(
-  p: { tx: WagerTransaction; at: Date },
+  p: { tx: WagerTransaction; at: Date; retry: ReferenceRetryPolicy },
   referenceFound: boolean,
 ): WagerDecision {
   if (p.tx.status === WagerTransactionStatus.Pending) {
-    const delayMs = referenceRetryDelayMs(0, DEFAULT_REFERENCE_RETRY);
-    p.tx.markPendingReference({ nextAttemptAt: new Date(p.at.getTime() + delayMs) });
+    p.tx.markPendingReference({ nextAttemptAt: nextAttemptAt(p.at, 0, p.retry) });
   }
   return { outcome: 'PENDING_REFERENCE', referenceFound };
 }
@@ -125,16 +150,7 @@ function isReversal(tx: WagerTransaction): boolean {
   return tx.kind === K.Refund || tx.kind === K.Rollback;
 }
 
-function applyMovement(
-  p: {
-    tx: WagerTransaction;
-    wallet: Wallet;
-    reference: ReferenceView | null;
-    at: Date;
-    entryId: string;
-  },
-  referenceId: string | undefined,
-): WagerDecision {
+function applyMovement(p: DecideWagerParams, referenceId: string | undefined): WagerDecision {
   const { tx, wallet, at } = p;
   const direction = tx.ledgerDirectionFor(p.reference?.transaction);
   const movement = { money: tx.money, transactionId: tx.id, entryId: p.entryId, at };
