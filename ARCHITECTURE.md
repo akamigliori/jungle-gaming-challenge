@@ -32,6 +32,9 @@ src/
   `infrastructure` implementa as portas da `application`. As camadas externas (`interfaces` e
   `infrastructure`) podem se referenciar para composição e leituras (health check, consulta do
   ledger no `GET`), mas o núcleo (`domain` e `application`) nunca importa nenhuma delas.
+- A regra é verificada no CI por `bun run check:architecture`: o domínio só pode importar o
+  próprio domínio e `decimal.js`; a aplicação, o domínio, ela mesma e `node:crypto` (hash do
+  payload). Qualquer outro import no núcleo — framework, ORM, SDK ou camada externa — falha o build.
 - Entidades de domínio têm construtor privado, fábricas estáticas e estado privado; `rehydrate`
   reconstrói a partir do banco sem revalidar.
 - Entidades de domínio e de persistência são classes separadas: o mapeamento do MikroORM usa
