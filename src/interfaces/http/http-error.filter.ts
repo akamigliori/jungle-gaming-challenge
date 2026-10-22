@@ -4,6 +4,7 @@ import { InjectPinoLogger, type PinoLogger } from 'nestjs-pino';
 import { ZodError } from 'zod';
 import { DomainError } from '../../domain/shared/domain-error';
 import type { ErrorCode } from '../../domain/shared/failure-code';
+import { safeError } from '../../infrastructure/logging/safe-error';
 import { isConnectionError } from '../../infrastructure/persistence/pg-errors';
 import { statusFor } from './error-status-map';
 
@@ -22,6 +23,13 @@ interface ResolvedError {
   code: ErrorCode;
   message: string;
   retryable: boolean;
+}
+
+const GENERIC_5XX_MESSAGE = 'Internal server error';
+const UNAVAILABLE_MESSAGE = 'Service temporarily unavailable';
+
+function genericMessage(status: number): string {
+  return status === 503 ? UNAVAILABLE_MESSAGE : GENERIC_5XX_MESSAGE;
 }
 
 /** Segundos sugeridos ao cliente antes de reenviar após um 503. */
@@ -59,7 +67,10 @@ export class HttpErrorFilter implements ExceptionFilter {
 
   private resolve(exception: unknown): ResolvedError {
     if (exception instanceof DomainError) {
-      return { code: exception.code, message: exception.message, ...statusFor(exception.code) };
+      const mapped = statusFor(exception.code);
+      // 5xx nunca ecoa a mensagem interna: o detalhe fica só no log
+      const message = mapped.status >= 500 ? genericMessage(mapped.status) : exception.message;
+      return { code: exception.code, message, ...mapped };
     }
     if (exception instanceof ZodError) {
       return this.fromCode('INVALID_PAYLOAD', zodMessage(exception));
@@ -84,7 +95,7 @@ export class HttpErrorFilter implements ExceptionFilter {
     const status = exception.getStatus();
     if (status === 404) return this.fromCode('NOT_FOUND', exception.message);
     if (status === 401 || status === 403) return this.fromCode('UNAUTHORIZED', exception.message);
-    if (status === 503) return this.fromCode('SERVICE_UNAVAILABLE', exception.message);
+    if (status === 503) return this.fromCode('SERVICE_UNAVAILABLE', UNAVAILABLE_MESSAGE);
     if (status >= 500) return this.fromCode('INTERNAL_ERROR', 'Internal server error');
     // demais 4xx do framework (JSON malformado, corpo grande demais, etc.): payload inválido,
     // preservando o status original
@@ -94,41 +105,6 @@ export class HttpErrorFilter implements ExceptionFilter {
   private fromCode(code: ErrorCode, message: string): ResolvedError {
     return { code, message, ...statusFor(code) };
   }
-}
-
-/** Profundidade máxima da cadeia de `cause` percorrida no log. */
-const MAX_CAUSE_DEPTH = 3;
-
-interface SafeError {
-  type: string;
-  message?: string;
-  stack?: string;
-  code?: string;
-  constraint?: string;
-  table?: string;
-  cause?: SafeError;
-}
-
-/**
- * Reduz um erro aos campos que podem ir para o log. Erros do driver (com SQLSTATE `code`) trazem
- * a query com os valores já interpolados na mensagem e na stack, e `detail` com a linha inteira:
- * por isso, neles, só nome, código, constraint e tabela são mantidos.
- */
-export function safeError(error: unknown, depth = 0): SafeError {
-  if (!(error instanceof Error)) return { type: typeof error };
-  const { code, constraint, table } = error as unknown as Record<string, unknown>;
-  const isDriverError = typeof code === 'string' || typeof constraint === 'string';
-  const safe: SafeError = { type: error.name };
-  if (typeof code === 'string') safe.code = code;
-  if (typeof constraint === 'string') safe.constraint = constraint;
-  if (typeof table === 'string') safe.table = table;
-  if (!isDriverError) {
-    safe.message = error.message;
-    safe.stack = error.stack;
-  }
-  const { cause } = error;
-  if (cause !== undefined && depth < MAX_CAUSE_DEPTH) safe.cause = safeError(cause, depth + 1);
-  return safe;
 }
 
 /** Resume os problemas de validação sem ecoar os valores recebidos. */

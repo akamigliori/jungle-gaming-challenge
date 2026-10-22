@@ -1,29 +1,25 @@
-import type { IntegrationEvent } from '../../domain/events/integration-event';
-import { WagerTransactionPendingReference } from '../../domain/events/wager-transaction-pending-reference';
-import { WagerTransactionProcessed } from '../../domain/events/wager-transaction-processed';
-import { WagerTransactionRejected } from '../../domain/events/wager-transaction-rejected';
-import { WalletBalanceChanged } from '../../domain/events/wallet-balance-changed';
-import { OutboxMessage } from '../../domain/messaging/outbox-message';
+import { InboxMessage } from '../../domain/messaging/inbox-message';
 import { InvalidPayloadError, InvariantViolationError } from '../../domain/shared/domain-error';
 import { Money, type MoneyProps } from '../../domain/shared/money';
-import {
-  decideWager,
-  type ReferenceView,
-  type WagerDecision,
-} from '../../domain/wager/wager-decision';
+import type { ReferenceRetryPolicy } from '../../domain/wager/reference-retry';
+import { decideWager } from '../../domain/wager/wager-decision';
 import { OPENING_PROVIDER_ID, WagerTransaction } from '../../domain/wager/wager-transaction';
 import { WagerTransactionKind } from '../../domain/wager/wager-transaction-kind';
-import type { Wallet } from '../../domain/wallet/wallet';
+import { WagerTransactionStatus } from '../../domain/wager/wager-transaction-status';
 import type { Clock } from '../ports/clock';
 import type { IdGenerator } from '../ports/id-generator';
+import type { InboxReceipt, InboxRepository } from '../ports/inbox.repository';
 import type { LedgerRepository } from '../ports/ledger.repository';
+import type { Metrics, ProcessingChannel, ProcessingOutcome } from '../ports/metrics';
 import type { OutboxRepository } from '../ports/outbox.repository';
 import type { TransactionRunner } from '../ports/transaction-runner';
 import type { WagerTransactionRepository } from '../ports/wager-transaction.repository';
 import type { WalletRepository } from '../ports/wallet.repository';
 import { retryTransient } from '../shared/retry-transient';
 import { WalletNotFoundError } from '../wallet/wallet-errors';
+import { findReference } from './find-reference';
 import { computePayloadHash, type WagerPayload } from './payload-hash';
+import { recordDecision } from './record-decision';
 import { IdempotencyConflictError } from './wager-errors';
 
 export interface ProcessWagerCommand {
@@ -38,6 +34,8 @@ export interface ProcessWagerCommand {
   money: MoneyProps;
   referenceExternalTransactionId?: string;
   correlationId: string;
+  /** Recibo da mensagem SQS; ausente nas chamadas HTTP. */
+  inbox?: InboxReceipt;
 }
 
 export interface ProcessWagerResult {
@@ -51,17 +49,32 @@ export interface ProcessWagerDeps {
   wallets: WalletRepository;
   transactions: WagerTransactionRepository;
   ledger: LedgerRepository;
+  inbox: InboxRepository;
   outbox: OutboxRepository;
   ids: IdGenerator;
   clock: Clock;
+  metrics: Metrics;
   /** Erro que some ao refazer a transação inteira (lock_timeout, deadlock, conexão). */
   isTransient: (error: unknown) => boolean;
   /** Violação das constraints UNIQUE das transações de aposta (corrida no INSERT). */
   isUniqueViolation: (error: unknown) => boolean;
+  /** Backoff da referência pendente: define a primeira espera de quem fica `PENDING_REFERENCE`. */
+  referenceRetry: ReferenceRetryPolicy;
 }
 
 /** Política de novas tentativas em falhas transitórias: 3 execuções, espera base de 50 ms. */
 const TRANSIENT_RETRY = { maxAttempts: 3, baseDelayMs: 50 } as const;
+
+/** Resultado interno de uma execução: `redelivered` marca a mensagem SQS já registrada na inbox. */
+type Execution = ProcessWagerResult & { redelivered: boolean };
+
+const TRANSACTION_OUTCOMES: Record<WagerTransactionStatus, ProcessingOutcome> = {
+  [WagerTransactionStatus.Processed]: 'processed',
+  [WagerTransactionStatus.Rejected]: 'rejected',
+  [WagerTransactionStatus.Pending]: 'pending',
+  [WagerTransactionStatus.PendingReference]: 'pending',
+  [WagerTransactionStatus.Failed]: 'error',
+};
 
 /** Comando já validado fora da transação. */
 interface ValidatedWager {
@@ -71,19 +84,57 @@ interface ValidatedWager {
 }
 
 /**
- * Processa BET, WIN, LOSS, REFUND e ROLLBACK numa única transação SQL: trava a wallet,
- * verifica a idempotência, aplica as regras e grava wallet, transação, ledger e outbox juntos.
- * Ponto de entrada único para HTTP e SQS.
+ * Processa BET, WIN, LOSS, REFUND e ROLLBACK numa única transação SQL: trava a wallet, registra a
+ * inbox, verifica a idempotência, aplica as regras e grava wallet, transação, ledger e outbox
+ * juntos. Ponto de entrada único para HTTP e SQS.
  */
 export class ProcessWagerTransactionUseCase {
   constructor(private readonly deps: ProcessWagerDeps) {}
 
   async execute(cmd: ProcessWagerCommand): Promise<ProcessWagerResult> {
-    const wager = this.validate(cmd);
-    return retryTransient(() => this.runWithReRunOnConflict(wager), {
-      ...TRANSIENT_RETRY,
-      isTransient: this.deps.isTransient,
+    const { metrics } = this.deps;
+    const channel: ProcessingChannel = cmd.inbox ? 'sqs' : 'http';
+    const startedAt = performance.now();
+    let outcome: ProcessingOutcome = 'error';
+    try {
+      const wager = this.validate(cmd);
+      const { redelivered, ...result } = await retryTransient(
+        () => this.runWithReRunOnConflict(wager),
+        {
+          ...TRANSIENT_RETRY,
+          isTransient: this.deps.isTransient,
+          onTransient: (error) => metrics.lockConflict(error),
+          onRetry: () => metrics.retryScheduled('use_case_transient'),
+        },
+      );
+      outcome = this.recordResult(channel, result, redelivered);
+      return result;
+    } catch (error) {
+      if (error instanceof IdempotencyConflictError) outcome = 'conflict';
+      throw error;
+    } finally {
+      metrics.processingTimed(channel, outcome, (performance.now() - startedAt) / 1000);
+    }
+  }
+
+  /** Conta o resultado já commitado; devolve o desfecho para a latência. */
+  private recordResult(
+    channel: ProcessingChannel,
+    { transaction, idempotentReplay }: ProcessWagerResult,
+    redelivered: boolean,
+  ): ProcessingOutcome {
+    const { metrics } = this.deps;
+    if (idempotentReplay) {
+      metrics.duplicateDetected(redelivered ? 'inbox_redelivery' : 'idempotency_replay');
+      return 'replay';
+    }
+    metrics.transactionRecorded({
+      channel,
+      kind: transaction.kind,
+      status: transaction.status,
+      failureCode: transaction.failureCode,
     });
+    return TRANSACTION_OUTCOMES[transaction.status];
   }
 
   /** Validações que não dependem do banco; falham antes de abrir a transação. */
@@ -111,7 +162,7 @@ export class ProcessWagerTransactionUseCase {
    * esbarra na UNIQUE do banco no INSERT. A transação é desfeita e executada mais uma vez, quando
    * a consulta de idempotência já enxerga a original (replay ou conflito).
    */
-  private async runWithReRunOnConflict(wager: ValidatedWager): Promise<ProcessWagerResult> {
+  private async runWithReRunOnConflict(wager: ValidatedWager): Promise<Execution> {
     try {
       return await this.runOnce(wager);
     } catch (error) {
@@ -120,11 +171,12 @@ export class ProcessWagerTransactionUseCase {
     }
   }
 
-  private runOnce(wager: ValidatedWager): Promise<ProcessWagerResult> {
-    const { transactionRunner, wallets, ids, clock } = this.deps;
+  private runOnce(wager: ValidatedWager): Promise<Execution> {
+    const { transactionRunner, wallets, inbox, ids, clock, metrics } = this.deps;
     const { cmd } = wager;
 
     return transactionRunner.run(async () => {
+      let redelivered = false;
       // 1. lock da wallet antes de qualquer leitura: duplicatas concorrentes esperam aqui
       const wallet = await wallets.lockById(cmd.walletId);
       if (!wallet) throw new WalletNotFoundError('wallet not found');
@@ -132,27 +184,51 @@ export class ProcessWagerTransactionUseCase {
         throw new InvariantViolationError('locked wallet differs from the requested wallet');
       }
 
-      // 2. idempotência depois do lock: enxerga a original já commitada
-      const existing = await this.findExisting(wager);
-      if (existing) return { transaction: existing, idempotentReplay: true };
+      // 2. inbox na mesma transação: a entrega só fica registrada se o processamento commitar.
+      // Duplicata segue adiante e cai no replay pela chave de idempotência (a entrega é uma
+      // coisa, a operação de negócio é outra); outro corpo com o mesmo messageId é conflito.
+      if (cmd.inbox) {
+        const receivedAt = clock.now();
+        const message = InboxMessage.receive({ ...cmd.inbox, receivedAt });
+        // a linha só existe se o processamento commitar: recebida e processada no mesmo instante
+        message.markProcessed(receivedAt);
+        const delivery = await inbox.register(message);
+        if (delivery === 'conflict') {
+          metrics.duplicateDetected('inbox_conflict');
+          throw new IdempotencyConflictError('messageId already used with a different payload');
+        }
+        redelivered = delivery === 'duplicate';
+      }
 
-      // 3. transação nova: regras de negócio sobre a wallet travada
+      // 3. idempotência depois do lock: enxerga a original já commitada
+      const existing = await this.findExisting(wager);
+      if (existing) return { transaction: existing, idempotentReplay: true, redelivered };
+
+      // 4. transação nova: regras de negócio sobre a wallet travada
       const tx = this.newTransaction(wager);
-      const reference = await this.resolveReference(cmd);
+      const reference = await findReference(this.deps.transactions, tx);
       const expectedVersion = wallet.version;
       const at = clock.now();
-      const decision = decideWager({ tx, wallet, reference, at, entryId: ids.next() });
+      const decision = decideWager({
+        tx,
+        wallet,
+        reference,
+        at,
+        entryId: ids.next(),
+        retry: this.deps.referenceRetry,
+      });
 
-      // 4. grava o resultado (aplicado, rejeitado ou pendente) na mesma transação
-      await this.record({
+      // 5. grava o resultado (aplicado, rejeitado ou pendente) na mesma transação
+      await recordDecision(this.deps, {
         tx,
         wallet,
         decision,
         expectedVersion,
         at,
         correlationId: cmd.correlationId,
+        persist: 'insert',
       });
-      return { transaction: tx, idempotentReplay: false };
+      return { transaction: tx, idempotentReplay: false, redelivered };
     });
   }
 
@@ -167,6 +243,7 @@ export class ProcessWagerTransactionUseCase {
     const byKey = await transactions.findByIdempotencyKey(cmd.providerId, cmd.idempotencyKey);
     if (byKey) {
       if (!byKey.matchesPayload(payloadHash)) {
+        this.deps.metrics.duplicateDetected('idempotency_conflict');
         throw new IdempotencyConflictError('idempotency key already used with a different payload');
       }
       return byKey;
@@ -176,61 +253,12 @@ export class ProcessWagerTransactionUseCase {
       cmd.externalTransactionId,
     );
     if (byExternalId) {
+      this.deps.metrics.duplicateDetected('idempotency_conflict');
       throw new IdempotencyConflictError(
         'externalTransactionId already used with a different idempotency key',
       );
     }
     return null;
-  }
-
-  /** `null` quando a referência informada ainda não existe; ignorada se não houver referência. */
-  private async resolveReference(cmd: ProcessWagerCommand): Promise<ReferenceView | null> {
-    const { transactions } = this.deps;
-    if (cmd.referenceExternalTransactionId === undefined) return null;
-    const transaction = await transactions.findByExternalId(
-      cmd.providerId,
-      cmd.referenceExternalTransactionId,
-    );
-    if (!transaction) return null;
-    return { transaction, alreadyReversed: await transactions.isReversed(transaction.id) };
-  }
-
-  /** Ordem de escrita: wallet → transação → ledger → outbox. */
-  private async record(p: {
-    tx: WagerTransaction;
-    wallet: Wallet;
-    decision: WagerDecision;
-    expectedVersion: number;
-    at: Date;
-    correlationId: string;
-  }): Promise<void> {
-    const { wallets, transactions, ledger, outbox, ids } = this.deps;
-    const { tx, wallet, decision } = p;
-    const entry = decision.outcome === 'PROCESSED' ? decision.entry : null;
-
-    if (entry) await wallets.save(wallet, p.expectedVersion);
-    await transactions.add(tx);
-    if (entry) await ledger.append(entry);
-
-    const context = () => ({
-      eventId: ids.next(),
-      correlationId: p.correlationId,
-      occurredAt: p.at,
-    });
-    const enqueue = (event: IntegrationEvent<unknown>) =>
-      outbox.enqueue(OutboxMessage.enqueue(event));
-    switch (decision.outcome) {
-      case 'PROCESSED':
-        await enqueue(WagerTransactionProcessed.from(tx, context()));
-        if (entry) await enqueue(WalletBalanceChanged.from(wallet, entry, context()));
-        return;
-      case 'REJECTED':
-        await enqueue(WagerTransactionRejected.from(tx, context()));
-        return;
-      case 'PENDING_REFERENCE':
-        await enqueue(WagerTransactionPendingReference.from(tx, context()));
-        return;
-    }
   }
 
   private newTransaction({ cmd, money, payloadHash }: ValidatedWager): WagerTransaction {

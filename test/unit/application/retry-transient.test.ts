@@ -89,4 +89,36 @@ describe('retryTransient', () => {
     await expect(retryTransient(work, p)).rejects.toBe(boom);
     expect(state.calls).toBe(2);
   });
+
+  test('onTransient fires for every transient error; onRetry only when another attempt follows', async () => {
+    const errors = [new Transient('1'), new Transient('2'), new Transient('3')];
+    const { work } = failing(errors);
+    const { p } = policy();
+    const seen: unknown[] = [];
+    let retries = 0;
+
+    await retryTransient(work, {
+      ...p,
+      onTransient: (error) => seen.push(error),
+      onRetry: () => {
+        retries += 1;
+      },
+    }).catch(() => undefined);
+
+    expect(seen).toEqual(errors);
+    expect(retries).toBe(2);
+  });
+
+  test('a non-transient error fires no hook', async () => {
+    const { work } = failing([new Error('boom')]);
+    const { p } = policy();
+    let fired = 0;
+    const hook = () => {
+      fired += 1;
+    };
+
+    await retryTransient(work, { ...p, onTransient: hook, onRetry: hook }).catch(() => undefined);
+
+    expect(fired).toBe(0);
+  });
 });

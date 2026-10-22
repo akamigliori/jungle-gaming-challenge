@@ -22,6 +22,7 @@ const TRANSIENT_SQLSTATES = new Set([
   '55P03', // lock_not_available (lock_timeout estourado)
   '40P01', // deadlock_detected
   '40001', // serialization_failure
+  '57014', // query_canceled (statement_timeout estourado)
 ]);
 
 /** Códigos de erro de rede/Postgres que indicam banco indisponível (falha transitória). */
@@ -70,4 +71,21 @@ export function isTransientDbError(error: unknown): boolean {
   if (isConnectionError(error)) return true;
   const code = error instanceof Error ? (error as { code?: unknown }).code : undefined;
   return typeof code === 'string' && TRANSIENT_SQLSTATES.has(code);
+}
+
+/** Valor do rótulo de erros de conexão em `transientErrorCode`. */
+export const CONNECTION_LABEL = 'connection';
+/** Valor do rótulo de erros transitórios fora dos SQLSTATE conhecidos. */
+export const OTHER_LABEL = 'other';
+
+/**
+ * Classifica um erro transitório num conjunto fechado, próprio para rótulo de métrica: o SQLSTATE
+ * (`55P03`, `40P01`, `40001`, `57014`), `connection` ou `other`.
+ */
+export function transientErrorCode(error: unknown): string {
+  if (error instanceof LockWaitTimeoutException) return '55P03';
+  if (error instanceof DeadlockException) return '40P01';
+  if (isConnectionError(error)) return CONNECTION_LABEL;
+  const code = error instanceof Error ? (error as { code?: unknown }).code : undefined;
+  return typeof code === 'string' && TRANSIENT_SQLSTATES.has(code) ? code : OTHER_LABEL;
 }

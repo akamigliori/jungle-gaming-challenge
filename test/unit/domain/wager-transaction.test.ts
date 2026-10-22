@@ -117,12 +117,14 @@ describe('WagerTransaction creation', () => {
       balanceAfter: brl('5.00'),
       walletVersionAfter: 3,
       referenceTransactionId: 'tx-0',
+      referenceAttempts: 4,
     });
     expect(tx.status).toBe(S.Rejected);
     expect(tx.failureCode).toBe('AMOUNT_MISMATCH');
     expect(tx.balanceAfter?.toString()).toBe('5.00 BRL');
     expect(tx.walletVersionAfter).toBe(3);
     expect(tx.referenceTransactionId).toBe('tx-0');
+    expect(tx.referenceAttempts).toBe(4);
   });
 });
 
@@ -170,6 +172,34 @@ describe('WagerTransaction transitions', () => {
     expect(() => inState(S.Processed).markPendingReference({ nextAttemptAt: next })).toThrow(
       InvalidTransactionStateError,
     );
+  });
+
+  test('retryReferenceLater reschedules a pending tx and counts the attempt', () => {
+    const next = new Date('2026-01-01T00:00:04Z');
+    const tx = inState(S.PendingReference);
+    expect(tx.referenceAttempts).toBe(0);
+    tx.retryReferenceLater(next);
+    expect(tx.status).toBe(S.PendingReference);
+    expect(tx.referenceAttempts).toBe(1);
+    expect(tx.nextReferenceAttemptAt).toEqual(next);
+    tx.retryReferenceLater(next);
+    expect(tx.referenceAttempts).toBe(2);
+  });
+
+  test.each([S.Pending, S.Processed, S.Rejected, S.Failed])(
+    'retryReferenceLater from %s throws',
+    (from) => {
+      expect(() => inState(from).retryReferenceLater(at)).toThrow(InvalidTransactionStateError);
+    },
+  );
+
+  test('markProcessed and reject clear nextReferenceAttemptAt', () => {
+    const processed = inState(S.PendingReference);
+    processed.markProcessed({ at, ...outcome });
+    expect(processed.nextReferenceAttemptAt).toBeUndefined();
+    const rejected = inState(S.PendingReference);
+    rejected.reject('REFERENCE_NOT_PROCESSED', at);
+    expect(rejected.nextReferenceAttemptAt).toBeUndefined();
   });
 
   test('markProcessed sets processedAt and balanceAfter; reject sets failureCode', () => {

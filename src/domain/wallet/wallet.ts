@@ -1,7 +1,15 @@
-import { CurrencyMismatchError, InvariantViolationError } from '../shared/domain-error';
+import {
+  CurrencyMismatchError,
+  InvalidMoneyError,
+  InvariantViolationError,
+} from '../shared/domain-error';
 import { Money } from '../shared/money';
 import { LedgerDirection } from './ledger-direction';
-import { InsufficientFundsError, ReversalInsufficientFundsError } from './wallet-errors';
+import {
+  BalanceLimitExceededError,
+  InsufficientFundsError,
+  ReversalInsufficientFundsError,
+} from './wallet-errors';
 import { WalletLedgerEntry } from './wallet-ledger-entry';
 
 export type MovementInput = { money: Money; transactionId: string; entryId: string; at: Date };
@@ -92,7 +100,7 @@ export class Wallet {
   debit(input: MovementInput, purpose: DebitPurpose = 'WAGER'): WalletLedgerEntry {
     this.assertSameCurrency(input.money);
     if (this._balance.isLessThan(input.money)) {
-      const message = `insufficient funds: balance ${this._balance.toString()}, requested ${input.money.toString()}`;
+      const message = 'insufficient funds';
       throw purpose === 'REVERSAL'
         ? new ReversalInsufficientFundsError(message)
         : new InsufficientFundsError(message);
@@ -109,7 +117,7 @@ export class Wallet {
   private apply(direction: LedgerDirection, input: MovementInput): WalletLedgerEntry {
     const balanceAfter =
       direction === LedgerDirection.Credit
-        ? this._balance.add(input.money)
+        ? this.creditedBalance(input.money)
         : this._balance.subtract(input.money);
     const entry = WalletLedgerEntry.create({
       id: input.entryId,
@@ -126,6 +134,16 @@ export class Wallet {
     this._version += 1;
     this._updatedAt = input.at;
     return entry;
+  }
+
+  /** Estouro da faixa do NUMERIC(20,2) num crédito é regra de negócio, não payload inválido. */
+  private creditedBalance(money: Money): Money {
+    try {
+      return this._balance.add(money);
+    } catch (error) {
+      if (error instanceof InvalidMoneyError) throw new BalanceLimitExceededError(error.message);
+      throw error;
+    }
   }
 
   private assertSameCurrency(money: Money): void {

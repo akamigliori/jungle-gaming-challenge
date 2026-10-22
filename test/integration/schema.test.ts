@@ -101,7 +101,7 @@ beforeEach(async () => {
 describe('migration', () => {
   test('migration up/down/up is reversible', async () => {
     const migrator = orm.getMigrator();
-    await migrator.down();
+    await migrator.down({ to: 0 });
     const tables = await run(
       `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'
          AND table_name IN ('wallets','wager_transactions','wallet_ledger_entries','inbox_messages','outbox_messages')`,
@@ -110,6 +110,30 @@ describe('migration', () => {
     await migrator.up();
     const again = await run(`SELECT COUNT(*)::INT AS n FROM wallets`);
     expect(again[0]?.n).toBe(0);
+  });
+
+  test('partial index for pending dependents exists and its migration goes down and up', async () => {
+    const indexDef = async () => {
+      const rows = await run(
+        `SELECT indexdef FROM pg_indexes WHERE indexname = 'wager_tx_pending_dependents_idx'`,
+      );
+      return rows[0]?.indexdef as string | undefined;
+    };
+    const created = await indexDef();
+    expect(created).toContain(
+      '(wallet_id, provider_id, reference_external_transaction_id) WHERE (status = ',
+    );
+    expect(created).toContain('PENDING_REFERENCE');
+
+    // alvo explícito: um `down()` sem argumento desfaria a migration mais nova, qualquer que fosse
+    const migration = {
+      migrations: ['Migration20261021000000_pending_reference_dependents_index'],
+    };
+    const migrator = orm.getMigrator();
+    await migrator.down(migration);
+    expect(await indexDef()).toBeUndefined();
+    await migrator.up(migration);
+    expect(await indexDef()).toBe(created);
   });
 });
 

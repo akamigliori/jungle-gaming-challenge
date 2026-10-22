@@ -6,6 +6,7 @@ import type {
   OutboxRepository,
 } from '../../../src/application/ports/outbox.repository';
 import { OutboxMessage } from '../../../src/domain/messaging/outbox-message';
+import { noopMetrics } from '../../support/noop-metrics';
 
 const now = new Date('2026-10-21T12:00:00Z');
 
@@ -72,6 +73,7 @@ function useCase(outbox: OutboxRepository, publisher: EventPublisher) {
     outbox,
     publisher,
     clock: { now: () => now },
+    metrics: noopMetrics,
     batchSize: 50,
     leaseMs: 30_000,
     random: () => 1,
@@ -93,7 +95,7 @@ describe('PublishOutboxUseCase', () => {
       },
     }).runOnce();
 
-    expect(result).toEqual({ published: 4, failed: 0 });
+    expect(result).toEqual({ published: 4, failed: 0, failures: [] });
     expect(outbox.claims).toEqual([{ now, limit: 50, leaseMs: 30_000 }]);
     expect(sent.filter((id) => id.startsWith('a'))).toEqual(['a1', 'a2', 'a3']);
     expect(outbox.published.sort()).toEqual(['a1', 'a2', 'a3', 'b1']);
@@ -107,7 +109,16 @@ describe('PublishOutboxUseCase', () => {
       },
     }).runOnce();
 
-    expect(result).toEqual({ published: 1, failed: 1 });
+    expect(result).toMatchObject({ published: 1, failed: 1 });
+    expect(result.failures).toEqual([
+      {
+        eventId: 'a1',
+        eventType: 'WalletBalanceChanged',
+        aggregateId: 'wa',
+        attempts: 1,
+        error: new Error('sqs down'),
+      },
+    ]);
     expect(outbox.published).toEqual(['b1']);
     expect(outbox.rescheduled).toEqual([
       {
@@ -134,7 +145,7 @@ describe('PublishOutboxUseCase', () => {
       },
     }).runOnce();
 
-    expect(result).toEqual({ published: 0, failed: 1 });
+    expect(result).toMatchObject({ published: 0, failed: 1 });
     expect(sent).toEqual(['a1']);
     expect(outbox.published).toEqual([]);
     expect(outbox.postponed).toEqual([
@@ -155,6 +166,7 @@ describe('PublishOutboxUseCase', () => {
     expect(await useCase(outbox, { publish: async () => {} }).runOnce()).toEqual({
       published: 0,
       failed: 0,
+      failures: [],
     });
   });
 });

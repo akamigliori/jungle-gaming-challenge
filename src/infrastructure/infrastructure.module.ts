@@ -1,3 +1,4 @@
+import type { Writable } from 'node:stream';
 import type { SQSClient } from '@aws-sdk/client-sqs';
 import { MikroOrmModule } from '@mikro-orm/nestjs';
 import type { DynamicModule, OnApplicationShutdown } from '@nestjs/common';
@@ -20,12 +21,12 @@ import { SystemClock } from './time/system.clock';
 export class InfrastructureModule implements OnApplicationShutdown {
   constructor(@Inject(SQS_CLIENT) private readonly sqs: SQSClient) {}
 
-  static forRoot(config: AppConfig): DynamicModule {
+  static forRoot(config: AppConfig, logDestination?: Writable): DynamicModule {
     return {
       module: InfrastructureModule,
       global: true,
       imports: [
-        createLoggerModule(config),
+        createLoggerModule(config, logDestination),
         MikroOrmModule.forRootAsync({
           // sem `ensureDatabase`: a aplicação sobe mesmo com o Postgres fora do ar
           // (o readiness reporta `down`); criar o banco é papel das migrations

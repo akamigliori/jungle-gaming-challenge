@@ -1,10 +1,15 @@
 import { describe, expect, test } from 'bun:test';
 import { Money } from '../../../src/domain/shared/money';
 import {
+  DEFAULT_REFERENCE_RETRY,
+  referenceRetryDelayMs,
+} from '../../../src/domain/wager/reference-retry';
+import {
   decideWager,
-  REFERENCE_RETRY_INITIAL_DELAY_MS,
   type ReferenceView,
+  reevaluatePendingWager,
 } from '../../../src/domain/wager/wager-decision';
+import { InvalidTransactionStateError } from '../../../src/domain/wager/wager-errors';
 import { WagerTransaction } from '../../../src/domain/wager/wager-transaction';
 import { WagerTransactionKind as K } from '../../../src/domain/wager/wager-transaction-kind';
 import { WagerTransactionStatus as S } from '../../../src/domain/wager/wager-transaction-status';
@@ -71,7 +76,14 @@ const run = (
   wallet = newWallet(),
 ) => ({
   wallet,
-  decision: decideWager({ tx, wallet, reference, at, entryId: 'entry-1' }),
+  decision: decideWager({
+    tx,
+    wallet,
+    reference,
+    at,
+    entryId: 'entry-1',
+    retry: DEFAULT_REFERENCE_RETRY,
+  }),
 });
 
 describe('decideWager BET', () => {
@@ -146,10 +158,10 @@ describe('decideWager WIN', () => {
   test('missing reference -> PENDING_REFERENCE with next attempt', () => {
     const tx = makeTx(K.Win, '50.00', { ref: 'ext-ref' });
     const { decision } = run(tx, null);
-    expect(decision).toEqual({ outcome: 'PENDING_REFERENCE' });
+    expect(decision).toEqual({ outcome: 'PENDING_REFERENCE', referenceFound: false });
     expect(tx.status).toBe(S.PendingReference);
     expect(tx.nextReferenceAttemptAt).toEqual(
-      new Date(at.getTime() + REFERENCE_RETRY_INITIAL_DELAY_MS),
+      new Date(at.getTime() + referenceRetryDelayMs(0, DEFAULT_REFERENCE_RETRY)),
     );
     expect(tx.balanceAfter).toBeUndefined();
   });
@@ -178,6 +190,43 @@ describe('decideWager WIN', () => {
       outcome: 'REJECTED',
       code: 'REFERENCE_MISMATCH',
     });
+  });
+});
+
+describe('decideWager credit overflow', () => {
+  const nearMax = () =>
+    Wallet.rehydrate({
+      id: WALLET,
+      playerId: PLAYER,
+      currency: 'BRL',
+      balance: money('999999999999999999.99'),
+      version: 1,
+      createdAt: at,
+      updatedAt: at,
+    });
+
+  test('WIN that would exceed the balance limit -> REJECTED BALANCE_LIMIT_EXCEEDED', () => {
+    const tx = makeTx(K.Win, '1.00', { ref: 'ext-ref' });
+    const { wallet, decision } = run(tx, processedRef(K.Bet, '1.00'), nearMax());
+    expect(decision).toEqual({ outcome: 'REJECTED', code: 'BALANCE_LIMIT_EXCEEDED' });
+    expect(tx.status).toBe(S.Rejected);
+    expect(wallet.balance.toJSON().amount).toBe('999999999999999999.99');
+    expect(wallet.version).toBe(1);
+  });
+
+  test('pending REFUND that would exceed the limit is terminated as REJECTED', () => {
+    const tx = makeTx(K.Refund, '50.00', { ref: 'ext-ref' });
+    tx.markPendingReference({ nextAttemptAt: at });
+    const decision = reevaluatePendingWager({
+      tx,
+      wallet: nearMax(),
+      reference: processedRef(K.Bet, '50.00'),
+      at,
+      entryId: 'entry-1',
+      retry: DEFAULT_REFERENCE_RETRY,
+    });
+    expect(decision).toEqual({ outcome: 'REJECTED', code: 'BALANCE_LIMIT_EXCEEDED' });
+    expect(tx.status).toBe(S.Rejected);
   });
 });
 
@@ -239,7 +288,10 @@ describe('decideWager REFUND', () => {
   });
 
   test('missing reference -> PENDING_REFERENCE', () => {
-    expect(run(refund(), null).decision).toEqual({ outcome: 'PENDING_REFERENCE' });
+    expect(run(refund(), null).decision).toEqual({
+      outcome: 'PENDING_REFERENCE',
+      referenceFound: false,
+    });
   });
 
   test.each([
@@ -301,5 +353,152 @@ describe('decideWager ROLLBACK', () => {
       outcome: 'REJECTED',
       code: 'INVALID_REFERENCE_KIND',
     });
+  });
+});
+
+describe('decideWager with pending references', () => {
+  const pendingRef = (kind: K, status: S) => {
+    const ref = makeTx(kind, '50.00', {
+      id: 'tx-ref',
+      ref: kind === K.Refund || kind === K.Rollback ? 'ext-x' : undefined,
+    });
+    if (status === S.PendingReference) ref.markPendingReference({ nextAttemptAt: at });
+    if (status === S.Rejected) ref.reject('INSUFFICIENT_FUNDS', at);
+    if (status === S.Failed) ref.fail('INSUFFICIENT_FUNDS', at);
+    return { transaction: ref, alreadyReversed: false } satisfies ReferenceView;
+  };
+  const rollback = () => makeTx(K.Rollback, '50.00', { ref: 'ext-ref' });
+
+  test('reference still PENDING_REFERENCE -> PENDING_REFERENCE with referenceFound', () => {
+    const tx = rollback();
+    const { decision } = run(tx, pendingRef(K.Win, S.PendingReference));
+    expect(decision).toEqual({ outcome: 'PENDING_REFERENCE', referenceFound: true });
+    expect(tx.status).toBe(S.PendingReference);
+  });
+
+  test('reference PENDING -> PENDING_REFERENCE with referenceFound', () => {
+    const { decision } = run(rollback(), pendingRef(K.Win, S.Pending));
+    expect(decision).toEqual({ outcome: 'PENDING_REFERENCE', referenceFound: true });
+  });
+
+  test.each([S.Rejected, S.Failed])('reference %s -> REFERENCE_NOT_PROCESSED', (status) => {
+    expect(run(rollback(), pendingRef(K.Win, status)).decision).toEqual({
+      outcome: 'REJECTED',
+      code: 'REFERENCE_NOT_PROCESSED',
+    });
+  });
+
+  test('tx already PENDING_REFERENCE with missing reference returns without mutating', () => {
+    const tx = rollback();
+    tx.markPendingReference({ nextAttemptAt: at });
+    const { decision } = run(tx, null);
+    expect(decision).toEqual({ outcome: 'PENDING_REFERENCE', referenceFound: false });
+    expect(tx.status).toBe(S.PendingReference);
+    expect(tx.referenceAttempts).toBe(0);
+    expect(tx.nextReferenceAttemptAt).toEqual(at);
+  });
+
+  test('tx already PENDING_REFERENCE with reference now PROCESSED -> PROCESSED', () => {
+    const tx = rollback();
+    tx.markPendingReference({ nextAttemptAt: at });
+    const { decision } = run(tx, processedRef(K.Win, '50.00'));
+    expect(decision.outcome).toBe('PROCESSED');
+    expect(tx.status).toBe(S.Processed);
+    expect(tx.nextReferenceAttemptAt).toBeUndefined();
+  });
+});
+
+describe('decideWager retry policy', () => {
+  test('the first wait comes from the policy passed in, not from the default', () => {
+    const tx = makeTx(K.Refund, '50.00', { ref: 'ext-ref' });
+    const retry = { baseMs: 100, maxMs: 400, maxAttempts: 3 };
+    decideWager({ tx, wallet: newWallet(), reference: null, at, entryId: 'entry-1', retry });
+    expect(tx.nextReferenceAttemptAt).toEqual(new Date(at.getTime() + 100));
+  });
+});
+
+describe('reevaluatePendingWager', () => {
+  const retry = { baseMs: 100, maxMs: 400, maxAttempts: 3 };
+  const pendingRefund = (attempts = 0) => {
+    const tx = makeTx(K.Refund, '50.00', { ref: 'ext-ref' });
+    tx.markPendingReference({ nextAttemptAt: at });
+    for (let i = 0; i < attempts; i += 1) tx.retryReferenceLater(at);
+    return tx;
+  };
+  const reevaluate = (
+    tx: WagerTransaction,
+    reference: ReferenceView | null,
+    wallet = newWallet(),
+  ) => ({
+    wallet,
+    decision: reevaluatePendingWager({ tx, wallet, reference, at, entryId: 'entry-1', retry }),
+  });
+  const unresolvedBet = () => {
+    const bet = makeTx(K.Bet, '50.00', { id: 'tx-ref' });
+    return { transaction: bet, alreadyReversed: false } satisfies ReferenceView;
+  };
+
+  test('reference still missing -> counts the attempt and waits base * 2^attempts', () => {
+    const tx = pendingRefund();
+    const { decision } = reevaluate(tx, null);
+    expect(decision).toEqual({ outcome: 'PENDING_REFERENCE', referenceFound: false });
+    expect(tx.status).toBe(S.PendingReference);
+    expect(tx.referenceAttempts).toBe(1);
+    expect(tx.nextReferenceAttemptAt).toEqual(new Date(at.getTime() + 200));
+  });
+
+  test('the wait is capped by maxMs', () => {
+    const tx = pendingRefund(1);
+    const longer = { baseMs: 100, maxMs: 150, maxAttempts: 10 };
+    reevaluatePendingWager({
+      tx,
+      wallet: newWallet(),
+      reference: null,
+      at,
+      entryId: 'entry-1',
+      retry: longer,
+    });
+    expect(tx.nextReferenceAttemptAt).toEqual(new Date(at.getTime() + 150));
+  });
+
+  test('last attempt with the reference missing -> REJECTED REFERENCE_NOT_FOUND', () => {
+    const tx = pendingRefund(2);
+    const { wallet, decision } = reevaluate(tx, null);
+    expect(decision).toEqual({ outcome: 'REJECTED', code: 'REFERENCE_NOT_FOUND' });
+    expect(tx.status).toBe(S.Rejected);
+    expect(tx.failureCode).toBe('REFERENCE_NOT_FOUND');
+    expect(tx.referenceAttempts).toBe(2);
+    expect(tx.nextReferenceAttemptAt).toBeUndefined();
+    expect(tx.balanceAfter?.toJSON().amount).toBe('100.00');
+    expect(wallet.version).toBe(1);
+  });
+
+  test('last attempt with the reference found but unresolved -> REFERENCE_NOT_PROCESSED', () => {
+    const tx = pendingRefund(2);
+    expect(reevaluate(tx, unresolvedBet()).decision).toEqual({
+      outcome: 'REJECTED',
+      code: 'REFERENCE_NOT_PROCESSED',
+    });
+  });
+
+  test('reference now PROCESSED -> applies the movement', () => {
+    const tx = pendingRefund(1);
+    const { wallet, decision } = reevaluate(tx, processedRef(K.Bet, '50.00'));
+    expect(decision.outcome).toBe('PROCESSED');
+    expect(wallet.balance.toJSON().amount).toBe('150.00');
+    expect(tx.status).toBe(S.Processed);
+  });
+
+  test('a business rule still applies (amount mismatch)', () => {
+    const tx = pendingRefund();
+    expect(reevaluate(tx, processedRef(K.Bet, '10.00')).decision).toEqual({
+      outcome: 'REJECTED',
+      code: 'AMOUNT_MISMATCH',
+    });
+  });
+
+  test('a transaction that is not PENDING_REFERENCE is refused', () => {
+    const tx = makeTx(K.Refund, '50.00', { ref: 'ext-ref' });
+    expect(() => reevaluate(tx, null)).toThrow(InvalidTransactionStateError);
   });
 });

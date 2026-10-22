@@ -1,4 +1,8 @@
 import { z } from 'zod';
+import {
+  DEFAULT_REFERENCE_RETRY,
+  type ReferenceRetryPolicy,
+} from '../../domain/wager/reference-retry';
 
 export type Env = Record<string, string | undefined>;
 
@@ -11,9 +15,9 @@ export interface AppConfig {
     accessKeyId: string;
     secretAccessKey: string;
     queues: {
-      transactions: 'wager-transactions.fifo';
-      transactionsDlq: 'wager-transactions-dlq.fifo';
-      events: 'wagering-events.fifo';
+      transactions: string;
+      transactionsDlq: string;
+      events: string;
     };
   };
   outboxPublisher: {
@@ -22,12 +26,38 @@ export interface AppConfig {
     batchSize: number;
     leaseMs: number;
   };
+  consumer: {
+    enabled: boolean;
+    /** Laços de recebimento independentes por instância. */
+    loops: number;
+    /** Máximo de mensagens por recebimento (limite do SQS: 10). */
+    batchSize: number;
+    /** Duração do long polling (limite do SQS: 20 s). */
+    waitTimeSeconds: number;
+    /** Prazo para as mensagens em andamento terminarem no shutdown. */
+    shutdownTimeoutMs: number;
+  };
+  pendingReference: {
+    enabled: boolean;
+    pollIntervalMs: number;
+    batchSize: number;
+    /** Por quanto tempo o claim de um lote impede outra instância de pegá-lo. */
+    leaseMs: number;
+    retry: ReferenceRetryPolicy;
+  };
   logLevel: string;
 }
 
-const envSchema = z.object({
+/** Tamanho do lote do worker de pendências (o mesmo da outbox). */
+const PENDING_REFERENCE_BATCH_SIZE = 50;
+
+/** Folga do timeout HTTP do long poll sobre o `WaitTimeSeconds`. */
+export const LONG_POLL_TIMEOUT_MARGIN_MS = 5000;
+const MS_PER_SECOND = 1000;
+
+const fieldsSchema = z.object({
   DB_HOST: z.string().min(1).default('localhost'),
-  DB_PORT: z.coerce.number().int().positive().default(5433),
+  DB_PORT: z.coerce.number().int().positive().default(5432),
   DB_USER: z.string().min(1).default('wagering'),
   DB_PASSWORD: z.string().min(1).default('wagering'),
   DB_NAME: z.string().min(1).default('wagering'),
@@ -35,6 +65,9 @@ const envSchema = z.object({
   AWS_REGION: z.string().min(1).default('us-east-1'),
   AWS_ACCESS_KEY_ID: z.string().min(1).default('test'),
   AWS_SECRET_ACCESS_KEY: z.string().min(1).default('test'),
+  SQS_TRANSACTIONS_QUEUE: z.string().min(1).default('wager-transactions.fifo'),
+  SQS_TRANSACTIONS_DLQ: z.string().min(1).default('wager-transactions-dlq.fifo'),
+  SQS_EVENTS_QUEUE: z.string().min(1).default('wagering-events.fifo'),
   PORT: z.coerce.number().int().positive().default(3000),
   LOG_LEVEL: z.string().min(1).default('info'),
   // `stringbool` aceita "true"/"false" (e "1"/"0"); `coerce.boolean` trataria "false" como verdadeiro
@@ -42,6 +75,45 @@ const envSchema = z.object({
   OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(250),
   OUTBOX_BATCH_SIZE: z.coerce.number().int().positive().max(1000).default(50),
   OUTBOX_LEASE_MS: z.coerce.number().int().positive().default(30_000),
+  SQS_CONSUMER_ENABLED: z.stringbool().default(true),
+  SQS_CONSUMER_LOOPS: z.coerce.number().int().positive().default(2),
+  // 2 laços × 4 mensagens = 8 transações ao mesmo tempo, deixando conexões do pool de 10 para HTTP e workers
+  SQS_RECEIVE_BATCH_SIZE: z.coerce.number().int().positive().max(10).default(4),
+  SQS_WAIT_TIME_SECONDS: z.coerce.number().int().min(0).max(20).default(10),
+  SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(20_000),
+  PENDING_REFERENCE_WORKER_ENABLED: z.stringbool().default(true),
+  PENDING_REFERENCE_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(1000),
+  PENDING_REFERENCE_LEASE_MS: z.coerce.number().int().positive().default(30_000),
+  REFERENCE_MAX_ATTEMPTS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(DEFAULT_REFERENCE_RETRY.maxAttempts),
+  REFERENCE_RETRY_BASE_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(DEFAULT_REFERENCE_RETRY.baseMs),
+  REFERENCE_RETRY_MAX_MS: z.coerce.number().int().positive().default(DEFAULT_REFERENCE_RETRY.maxMs),
+});
+
+// o shutdown espera o long poll em andamento terminar: o prazo tem de cobri-lo
+const envSchema = fieldsSchema.superRefine((e, ctx) => {
+  const longPollMs = e.SQS_WAIT_TIME_SECONDS * MS_PER_SECOND + LONG_POLL_TIMEOUT_MARGIN_MS;
+  if (e.SHUTDOWN_TIMEOUT_MS < longPollMs) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['SHUTDOWN_TIMEOUT_MS'],
+      message: `must be >= SQS_WAIT_TIME_SECONDS * 1000 + ${LONG_POLL_TIMEOUT_MARGIN_MS} (${longPollMs})`,
+    });
+  }
+  if (e.REFERENCE_RETRY_MAX_MS < e.REFERENCE_RETRY_BASE_MS) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['REFERENCE_RETRY_MAX_MS'],
+      message: 'must be >= REFERENCE_RETRY_BASE_MS',
+    });
+  }
 });
 
 /** Lê e valida as variáveis de ambiente; os defaults servem ao ambiente local do docker-compose. */
@@ -62,9 +134,9 @@ export function loadConfig(env: Env = process.env): AppConfig {
       accessKeyId: e.AWS_ACCESS_KEY_ID,
       secretAccessKey: e.AWS_SECRET_ACCESS_KEY,
       queues: {
-        transactions: 'wager-transactions.fifo',
-        transactionsDlq: 'wager-transactions-dlq.fifo',
-        events: 'wagering-events.fifo',
+        transactions: e.SQS_TRANSACTIONS_QUEUE,
+        transactionsDlq: e.SQS_TRANSACTIONS_DLQ,
+        events: e.SQS_EVENTS_QUEUE,
       },
     },
     outboxPublisher: {
@@ -72,6 +144,24 @@ export function loadConfig(env: Env = process.env): AppConfig {
       pollIntervalMs: e.OUTBOX_POLL_INTERVAL_MS,
       batchSize: e.OUTBOX_BATCH_SIZE,
       leaseMs: e.OUTBOX_LEASE_MS,
+    },
+    consumer: {
+      enabled: e.SQS_CONSUMER_ENABLED,
+      loops: e.SQS_CONSUMER_LOOPS,
+      batchSize: e.SQS_RECEIVE_BATCH_SIZE,
+      waitTimeSeconds: e.SQS_WAIT_TIME_SECONDS,
+      shutdownTimeoutMs: e.SHUTDOWN_TIMEOUT_MS,
+    },
+    pendingReference: {
+      enabled: e.PENDING_REFERENCE_WORKER_ENABLED,
+      pollIntervalMs: e.PENDING_REFERENCE_POLL_INTERVAL_MS,
+      batchSize: PENDING_REFERENCE_BATCH_SIZE,
+      leaseMs: e.PENDING_REFERENCE_LEASE_MS,
+      retry: {
+        baseMs: e.REFERENCE_RETRY_BASE_MS,
+        maxMs: e.REFERENCE_RETRY_MAX_MS,
+        maxAttempts: e.REFERENCE_MAX_ATTEMPTS,
+      },
     },
     logLevel: e.LOG_LEVEL,
   };

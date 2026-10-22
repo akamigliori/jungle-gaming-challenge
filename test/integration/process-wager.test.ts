@@ -3,9 +3,14 @@ import type { MikroORM } from '@mikro-orm/postgresql';
 import { CLOCK, type Clock } from '../../src/application/ports/clock';
 import { ID_GENERATOR, type IdGenerator } from '../../src/application/ports/id-generator';
 import {
+  INBOX_REPOSITORY,
+  type InboxRepository,
+} from '../../src/application/ports/inbox.repository';
+import {
   LEDGER_REPOSITORY,
   type LedgerRepository,
 } from '../../src/application/ports/ledger.repository';
+import { METRICS, type Metrics } from '../../src/application/ports/metrics';
 import {
   OUTBOX_REPOSITORY,
   type OutboxRepository,
@@ -31,6 +36,7 @@ import { IdempotencyConflictError } from '../../src/application/wager/wager-erro
 import { CreateWalletUseCase } from '../../src/application/wallet/create-wallet.use-case';
 import { WalletNotFoundError } from '../../src/application/wallet/wallet-errors';
 import { InvalidPayloadError } from '../../src/domain/shared/domain-error';
+import { DEFAULT_REFERENCE_RETRY } from '../../src/domain/wager/reference-retry';
 import { ReferenceRequiredError } from '../../src/domain/wager/wager-errors';
 import { WagerTransactionKind } from '../../src/domain/wager/wager-transaction-kind';
 import { WagerTransactionStatus } from '../../src/domain/wager/wager-transaction-status';
@@ -123,11 +129,14 @@ function buildUseCase(over: Partial<ProcessWagerDeps>): ProcessWagerTransactionU
     wallets: t.app.get<WalletRepository>(WALLET_REPOSITORY),
     transactions: t.app.get<WagerTransactionRepository>(WAGER_TRANSACTION_REPOSITORY),
     ledger: t.app.get<LedgerRepository>(LEDGER_REPOSITORY),
+    inbox: t.app.get<InboxRepository>(INBOX_REPOSITORY),
     outbox: t.app.get<OutboxRepository>(OUTBOX_REPOSITORY),
     ids: t.app.get<IdGenerator>(ID_GENERATOR),
     clock: t.app.get<Clock>(CLOCK),
+    metrics: t.app.get<Metrics>(METRICS),
     isTransient: isTransientDbError,
     isUniqueViolation: isWagerUniqueViolation,
+    referenceRetry: DEFAULT_REFERENCE_RETRY,
     ...over,
   });
 }
@@ -291,6 +300,74 @@ describe('ProcessWagerTransactionUseCase — new transactions', () => {
   });
 });
 
+describe('ProcessWagerTransactionUseCase — waking pending dependents', () => {
+  const refundOf = (walletId: string, reference: string) =>
+    command(walletId, {
+      externalTransactionId: `refund-of-${reference}`,
+      kind: WagerTransactionKind.Refund,
+      referenceExternalTransactionId: reference,
+    });
+
+  async function pendingRow(id: string) {
+    const [row] = await sql<{ status: string; due: boolean; reference_attempts: number }>(
+      `SELECT status, next_reference_attempt_at <= NOW() AS due, reference_attempts
+         FROM wager_transactions WHERE id = ?`,
+      [id],
+    );
+    return row;
+  }
+
+  test('REFUND before its BET → the processed BET makes the REFUND due right away', async () => {
+    const walletId = await createWallet();
+    const refund = await useCase.execute(refundOf(walletId, 'bet-1'));
+    expect(await pendingRow(refund.transaction.id)).toEqual({
+      status: 'PENDING_REFERENCE',
+      due: false,
+      reference_attempts: 0,
+    });
+
+    const bet = await useCase.execute(command(walletId));
+
+    expect(bet.transaction.status).toBe(WagerTransactionStatus.Processed);
+    expect(await pendingRow(refund.transaction.id)).toEqual({
+      status: 'PENDING_REFERENCE',
+      due: true,
+      reference_attempts: 0,
+    });
+    // acordar não gera evento: o REFUND segue só com o evento de quando ficou pendente
+    expect(await outboxTypesFor(refund.transaction.id)).toEqual([
+      'WagerTransactionPendingReference',
+    ]);
+  });
+
+  test('a REJECTED reference also wakes its dependents', async () => {
+    const walletId = await createWallet();
+    const refund = await useCase.execute(refundOf(walletId, 'bet-1'));
+
+    const bet = await useCase.execute(
+      command(walletId, { money: { amount: '150.00', currency: 'BRL' } }),
+    );
+
+    expect(bet.transaction.status).toBe(WagerTransactionStatus.Rejected);
+    expect((await pendingRow(refund.transaction.id))?.due).toBe(true);
+  });
+
+  test('a transaction that only becomes pending does not wake anyone', async () => {
+    const walletId = await createWallet();
+    const rollback = await useCase.execute(
+      command(walletId, {
+        externalTransactionId: 'rollback-1',
+        kind: WagerTransactionKind.Rollback,
+        referenceExternalTransactionId: 'refund-of-bet-1',
+      }),
+    );
+
+    await useCase.execute(refundOf(walletId, 'bet-1'));
+
+    expect((await pendingRow(rollback.transaction.id))?.due).toBe(false);
+  });
+});
+
 describe('ProcessWagerTransactionUseCase — idempotency', () => {
   test('replay with the same payload returns the original balanceAfter even after another BET', async () => {
     const walletId = await createWallet();
@@ -361,6 +438,10 @@ describe('ProcessWagerTransactionUseCase — idempotency', () => {
         hidden ? Promise.resolve(null) : real.findByIdempotencyKey(p, k),
       findByExternalId: (p, e) => (hidden ? Promise.resolve(null) : real.findByExternalId(p, e)),
       isReversed: (id) => real.isReversed(id),
+      findById: (id) => real.findById(id),
+      update: (tx, at) => real.update(tx, at),
+      wakeDependents: (p) => real.wakeDependents(p),
+      claimDuePendingReferences: (p) => real.claimDuePendingReferences(p),
     };
     const racingUseCase = buildUseCase({ transactions: racing });
     const before = await counts();
@@ -427,6 +508,54 @@ describe('ProcessWagerTransactionUseCase — validation and failures', () => {
     expect(await counts()).toEqual(before);
   });
 
+  test('WIN that would overflow NUMERIC(20,2) → REJECTED BALANCE_LIMIT_EXCEEDED; balance intact', async () => {
+    const walletId = await createWallet('999999999999999999.99');
+    const before = await counts();
+
+    const result = await useCase.execute(
+      command(walletId, {
+        kind: WagerTransactionKind.Win,
+        money: { amount: '1.00', currency: 'BRL' },
+      }),
+    );
+
+    expect(result.transaction.status).toBe(WagerTransactionStatus.Rejected);
+    expect(result.transaction.failureCode).toBe('BALANCE_LIMIT_EXCEEDED');
+    expect(await counts()).toEqual({
+      transactions: before.transactions + 1,
+      ledger: before.ledger,
+      outbox: before.outbox + 1,
+    });
+    expect(await outboxTypesFor(result.transaction.id)).toEqual(['WagerTransactionRejected']);
+    expect(await walletRow(walletId)).toEqual({ balance: '999999999999999999.99', version: 1 });
+  });
+
+  test('REFUND whose credit would overflow NUMERIC(20,2) → REJECTED BALANCE_LIMIT_EXCEEDED', async () => {
+    const walletId = await createWallet('999999999999999990.00');
+    await useCase.execute(command(walletId));
+    await useCase.execute(
+      command(walletId, {
+        externalTransactionId: 'win-1',
+        kind: WagerTransactionKind.Win,
+        referenceExternalTransactionId: 'bet-1',
+        money: { amount: '30.00', currency: 'BRL' },
+      }),
+    );
+    const balanceBefore = await walletRow(walletId);
+
+    const result = await useCase.execute(
+      command(walletId, {
+        externalTransactionId: 'refund-1',
+        kind: WagerTransactionKind.Refund,
+        referenceExternalTransactionId: 'bet-1',
+      }),
+    );
+
+    expect(result.transaction.status).toBe(WagerTransactionStatus.Rejected);
+    expect(result.transaction.failureCode).toBe('BALANCE_LIMIT_EXCEEDED');
+    expect(await walletRow(walletId)).toEqual(balanceBefore);
+  });
+
   test('REFUND without reference → ReferenceRequiredError', async () => {
     const walletId = await createWallet();
 
@@ -481,6 +610,94 @@ describe('ProcessWagerTransactionUseCase — validation and failures', () => {
     expect(result.transaction.status).toBe(WagerTransactionStatus.Processed);
     expect(await walletRow(walletId)).toEqual({ balance: '75.00', version: 2 });
     expect(await counts()).toEqual({ transactions: 1, ledger: 2, outbox: 4 });
+  });
+});
+
+describe('ProcessWagerTransactionUseCase — inbox', () => {
+  const receipt = (over: Partial<{ messageId: string; payloadHash: string }> = {}) => ({
+    consumerName: 'transactions-consumer',
+    messageId: 'msg-1',
+    payloadHash: 'a'.repeat(64),
+    ...over,
+  });
+
+  const inboxRows = () =>
+    sql<{ message_id: string; processed_at: Date | null; received_at: Date }>(
+      'SELECT message_id, received_at, processed_at FROM inbox_messages',
+    );
+
+  test('command with a receipt writes the inbox row together with transaction, ledger and outbox', async () => {
+    const walletId = await createWallet();
+
+    const result = await useCase.execute({ ...command(walletId), inbox: receipt() });
+
+    expect(result.idempotentReplay).toBe(false);
+    const rows = await inboxRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.message_id).toBe('msg-1');
+    expect(rows[0]?.processed_at).not.toBeNull();
+    expect(rows[0]?.processed_at).toEqual(rows[0]?.received_at as Date);
+    expect(await counts()).toEqual({ transactions: 1, ledger: 2, outbox: 4 });
+  });
+
+  test('same command and receipt again → replay; one inbox row and one ledger effect', async () => {
+    const walletId = await createWallet();
+    const cmd = { ...command(walletId), inbox: receipt() };
+    await useCase.execute(cmd);
+
+    const replay = await useCase.execute(cmd);
+
+    expect(replay.idempotentReplay).toBe(true);
+    expect(await inboxRows()).toHaveLength(1);
+    expect(await counts()).toEqual({ transactions: 1, ledger: 2, outbox: 4 });
+    expect(await walletRow(walletId)).toEqual({ balance: '75.00', version: 2 });
+  });
+
+  test('same messageId with another payloadHash → IdempotencyConflictError; nothing written', async () => {
+    const walletId = await createWallet();
+    await useCase.execute({ ...command(walletId), inbox: receipt() });
+    const before = await counts();
+
+    const attempt = useCase.execute({
+      ...command(walletId, { externalTransactionId: 'bet-2' }),
+      inbox: receipt({ payloadHash: 'b'.repeat(64) }),
+    });
+
+    await expect(attempt).rejects.toBeInstanceOf(IdempotencyConflictError);
+    expect(await inboxRows()).toHaveLength(1);
+    expect(await counts()).toEqual(before);
+  });
+
+  test('two parallel calls with the same receipt → one ledger effect and both resolve', async () => {
+    const walletId = await createWallet();
+    const cmd = { ...command(walletId), inbox: receipt() };
+
+    const results = await Promise.all([useCase.execute(cmd), useCase.execute(cmd)]);
+
+    expect(results.filter((r) => r.idempotentReplay)).toHaveLength(1);
+    expect(await inboxRows()).toHaveLength(1);
+    expect(await counts()).toEqual({ transactions: 1, ledger: 2, outbox: 4 });
+    expect(await walletRow(walletId)).toEqual({ balance: '75.00', version: 2 });
+  });
+
+  test('when the outbox insert fails, no inbox row remains', async () => {
+    const walletId = await createWallet();
+    const failingOutbox: Pick<OutboxRepository, 'enqueue'> = {
+      enqueue: () => Promise.reject(new Error('outbox unavailable')),
+    };
+    const broken = await createTestApp({}, (builder) =>
+      builder.overrideProvider(OUTBOX_REPOSITORY).useValue(failingOutbox),
+    );
+    try {
+      const attempt = broken.app
+        .get(ProcessWagerTransactionUseCase)
+        .execute({ ...command(walletId), inbox: receipt() });
+
+      await expect(attempt).rejects.toThrow('outbox unavailable');
+      expect(await inboxRows()).toHaveLength(0);
+    } finally {
+      await broken.close();
+    }
   });
 });
 

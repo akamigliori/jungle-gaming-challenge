@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import type { Writable } from 'node:stream';
 import type { INestApplication, NestApplicationOptions } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { Logger } from 'nestjs-pino';
@@ -19,6 +20,11 @@ export function configureApp(app: INestApplication): INestApplication {
 }
 
 /** Cria a aplicação Nest (sem escutar porta), usada pelo `main.ts` e pelos testes. */
-export async function createApp(config: AppConfig): Promise<INestApplication> {
-  return configureApp(await NestFactory.create(AppModule.forRoot(config), APP_OPTIONS));
+export async function createApp(
+  config: AppConfig,
+  logDestination?: Writable,
+): Promise<INestApplication> {
+  return configureApp(
+    await NestFactory.create(AppModule.forRoot(config, logDestination), APP_OPTIONS),
+  );
 }

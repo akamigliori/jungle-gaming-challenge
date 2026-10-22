@@ -1,10 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 import { ConnectionException } from '@mikro-orm/core';
 import type { ArgumentsHost } from '@nestjs/common';
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, HttpException, NotFoundException } from '@nestjs/common';
 import { z } from 'zod';
 import { TransientFailureError } from '../../../src/application/shared/retry-transient';
 import {
+  DomainError,
   InvalidMoneyError,
   InvariantViolationError,
 } from '../../../src/domain/shared/domain-error';
@@ -48,6 +49,17 @@ describe('HttpErrorFilter', () => {
     expect(c.status).toBe(422);
     expect(c.body).toEqual({
       error: { code: 'INSUFFICIENT_FUNDS', message: 'insufficient funds', retryable: false },
+    });
+  });
+
+  test('DomainError mapped to 5xx never echoes its message', () => {
+    class BrokenDependencyError extends DomainError {
+      readonly code = 'INTERNAL_ERROR' as const;
+    }
+    const c = run(new BrokenDependencyError('secret connection detail'));
+    expect(c.status).toBe(500);
+    expect(c.body).toEqual({
+      error: { code: 'INTERNAL_ERROR', message: 'Internal server error', retryable: false },
     });
   });
 
@@ -96,6 +108,14 @@ describe('HttpErrorFilter', () => {
     expect(run(Object.assign(new Error('x'), { status: 400 })).status).toBe(500);
   });
 
+  test('HttpException 503 → generic unavailable message, not the original one', () => {
+    const c = run(new HttpException('db password leaked', 503));
+    expect(c.status).toBe(503);
+    expect((c.body as { error: { message: string } }).error.message).toBe(
+      'Service temporarily unavailable',
+    );
+  });
+
   test('NotFoundException → 404 NOT_FOUND', () => {
     const c = run(new NotFoundException('Cannot GET /nope'));
     expect(c.status).toBe(404);
@@ -103,7 +123,7 @@ describe('HttpErrorFilter', () => {
   });
 
   test('database connection error → 503 retryable with Retry-After', () => {
-    const c = run(new ConnectionException(new Error('connect ECONNREFUSED 127.0.0.1:5433')));
+    const c = run(new ConnectionException(new Error('connect ECONNREFUSED 127.0.0.1:5432')));
     expect(c.status).toBe(503);
     expect(c.headers['Retry-After']).toBeDefined();
     expect(c.body).toEqual({
