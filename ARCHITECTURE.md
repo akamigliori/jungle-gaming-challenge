@@ -253,6 +253,19 @@ até 4 × 2 s = 8 s por tentativa e, com 3 tentativas e o backoff (até 100 ms +
 dessa conta. É um limite teórico: exige que toda espera estoure o tempo máximo; nos testes de
 concorrência, 200 requisições simultâneas (20 por wallet) terminam todas em cerca de 1 s.
 
+**Timeouts de sessão.** Toda conexão do pool abre com `statement_timeout = 5s` e
+`idle_in_transaction_session_timeout = 10s`. Se um processo vivo travar no meio de uma transação
+(por exemplo, esperando algo externo com a transação aberta), o Postgres a cancela e libera o lock
+da wallet em vez de segurá-lo para sempre. Quando o processo morre (`SIGKILL`), o Postgres já
+derruba a conexão e desfaz a transação; os timeouts cobrem o caso do processo que continua vivo.
+Um comando cancelado por `statement_timeout` (SQLSTATE `57014`) é tratado como falha transitória e
+refeito por `retryTransient`.
+
+**Fila de entrada do SQS.** O `VisibilityTimeout` da fila de entrada é de 60 s, acima do pior caso
+de ≈ 24,3 s do processamento, para que a mensagem não volte a ficar visível enquanto a primeira
+execução ainda roda. A `maxReceiveCount` da redrive policy é 10. Os nomes das filas são
+configuráveis por `SQS_TRANSACTIONS_QUEUE`, `SQS_TRANSACTIONS_DLQ` e `SQS_EVENTS_QUEUE`.
+
 **Pool de conexões.** Cada instância usa o pool padrão do MikroORM (knex: no máximo 10 conexões).
 Requisições além disso esperam por uma conexão livre antes de abrir a transação, então essa espera
 não consome o `lock_timeout`. Os testes de concorrência disparam 200 requisições simultâneas
@@ -268,9 +281,11 @@ teste de que o lock é por wallet e não global: outra conexão segura o `FOR UP
 na wallet B recebe `201` em menos de 1 s. Para validar que os testes detectam a falta do lock, o
 `FOR UPDATE` foi removido manualmente numa verificação pontual: quatro dos seis testes falharam (o
 da mesma chave em duas wallets depende só da `UNIQUE`, e o do lock por wallet não depende do lock
-da aplicação). Depois de cada teste que grava pela aplicação, um helper confere em SQL que o saldo
-de cada wallet é igual à soma do seu ledger e que as versões do ledger são contínuas (a suíte de
-schema fica de fora: ela grava linhas soltas de propósito para provocar cada constraint).
+da aplicação). Depois de cada teste que grava pela aplicação, um helper confere em SQL que o
+saldo de cada wallet é igual à soma do seu ledger, que as versões do ledger são contínuas e que a
+cadeia de saldos fecha (o `balance_before` de cada lançamento é o `balance_after` do anterior, e o
+primeiro parte de zero). A suíte de schema fica de fora: ela grava linhas soltas de propósito para
+provocar cada constraint.
 
 ## 10. Idempotência e replay
 
@@ -438,11 +453,6 @@ na mensagem passa pelas mesmas validações de domínio.
   alertar quando o SQS estiver fora ou um evento travar em retry.
 - **Ordem estrita de eventos por wallet**: publicar por agregado em ordem de `wallet_version`
   (coluna de sequência na outbox e claim por agregado), em vez do melhor esforço atual.
-- **Visibility timeout do SQS maior que o pior caso do processamento**: uma mensagem pode levar
-  até ~24 s só em esperas de lock e retries, mais a espera por conexão do pool (seção 9); o
-  visibility timeout da fila de entrada precisa ser maior que isso, senão a mensagem volta a ficar
-  visível e é entregue a outro worker enquanto a primeira execução ainda roda (o que é seguro pela
-  idempotência, mas desperdiça trabalho).
 - **Revisitar `403` vs `401`** quando a autenticação real estiver ativa: hoje o filtro de erros
   traduz ambos para o código `UNAUTHORIZED`. O desejado é token inválido ou ausente → `401`, e
   token válido de um provedor diferente do `providerId` do corpo → `403`, com código próprio.

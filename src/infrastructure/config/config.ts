@@ -11,9 +11,9 @@ export interface AppConfig {
     accessKeyId: string;
     secretAccessKey: string;
     queues: {
-      transactions: 'wager-transactions.fifo';
-      transactionsDlq: 'wager-transactions-dlq.fifo';
-      events: 'wagering-events.fifo';
+      transactions: string;
+      transactionsDlq: string;
+      events: string;
     };
   };
   outboxPublisher: {
@@ -35,6 +35,9 @@ const envSchema = z.object({
   AWS_REGION: z.string().min(1).default('us-east-1'),
   AWS_ACCESS_KEY_ID: z.string().min(1).default('test'),
   AWS_SECRET_ACCESS_KEY: z.string().min(1).default('test'),
+  SQS_TRANSACTIONS_QUEUE: z.string().min(1).default('wager-transactions.fifo'),
+  SQS_TRANSACTIONS_DLQ: z.string().min(1).default('wager-transactions-dlq.fifo'),
+  SQS_EVENTS_QUEUE: z.string().min(1).default('wagering-events.fifo'),
   PORT: z.coerce.number().int().positive().default(3000),
   LOG_LEVEL: z.string().min(1).default('info'),
   // `stringbool` aceita "true"/"false" (e "1"/"0"); `coerce.boolean` trataria "false" como verdadeiro
@@ -62,9 +65,9 @@ export function loadConfig(env: Env = process.env): AppConfig {
       accessKeyId: e.AWS_ACCESS_KEY_ID,
       secretAccessKey: e.AWS_SECRET_ACCESS_KEY,
       queues: {
-        transactions: 'wager-transactions.fifo',
-        transactionsDlq: 'wager-transactions-dlq.fifo',
-        events: 'wagering-events.fifo',
+        transactions: e.SQS_TRANSACTIONS_QUEUE,
+        transactionsDlq: e.SQS_TRANSACTIONS_DLQ,
+        events: e.SQS_EVENTS_QUEUE,
       },
     },
     outboxPublisher: {
