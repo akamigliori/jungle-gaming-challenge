@@ -28,6 +28,9 @@ jobs:
       - name: Guarda de dinheiro
         run: bun run check:money
 
+      - name: Regra de dependência entre camadas
+        run: bun run check:architecture
+
       - name: Testes unitários
         run: bun run test
 
