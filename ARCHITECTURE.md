@@ -724,6 +724,7 @@ na mensagem passa pelas mesmas validações de domínio.
   | `wagering_lock_conflicts_total` | `code` (`55P03`, `40P01`, `40001`, `57014`, `connection`, `other`) | Há disputa de lock, deadlock ou timeout no banco? O rótulo `connection` agrupa as falhas de conexão (banco fora), que seguem a mesma política de retry. Contado onde o erro transitório é classificado, a cada ocorrência (inclusive a que esgota as tentativas). |
   | `wagering_outbox_pending` | (gauge) | Quantos eventos já confirmados no banco ainda não foram publicados? |
   | `wagering_outbox_lag_seconds` | (gauge) | Há quanto tempo o evento pendente mais antigo espera? Cresce se o SQS cai ou um evento trava em retry. |
+  | `wagering_reconciliations_total` | `result` (`consistent`, `divergent`) | Quantas conferências de wallet foram feitas e quantas acharam divergência? Alertar em qualquer aumento de `result="divergent"`. |
   | `wagering_processing_duration_seconds` | histograma por `channel` e `outcome` (`processed`, `rejected`, `pending`, `replay`, `conflict`, `resolved`, `rescheduled`, `skipped`, `error`; `error` inclui erros do cliente, como payload inválido ou wallet inexistente) | Quanto tempo o caso de uso leva (transação inteira, com lock e retries), por canal e resultado? |
 
   As métricas são **por instância**: contadores locais em memória, que não participam de nenhuma
@@ -733,6 +734,43 @@ na mensagem passa pelas mesmas validações de domínio.
   única consulta curta (índice parcial dos não publicados) e prazo de 1 s; se o banco não responde
   a tempo, valem `NaN` e a coleta continua; uma consulta lenta é reaproveitada pelas coletas seguintes (uma por vez por instância) e o `statement_timeout` local de 1 s a cancela no servidor. Todas as instâncias enxergam a mesma outbox, então o
   valor é o mesmo em cada uma (agregar com `max`, não `sum`).
+- **Reconciliação** (`POST /wallets/:walletId/reconciliation`): confere o saldo gravado de uma
+  wallet contra o ledger. Responde `200` sempre que a wallet existe, com a divergência sinalizada
+  no corpo (`consistent: false`, `issues`), e `404 WALLET_NOT_FOUND` se não existe. Exemplo:
+
+  ```json
+  {
+    "walletId": "0192f291-27dd-7d3f-8071-5f8685deef37",
+    "storedBalance": { "amount": "115.00", "currency": "BRL" },
+    "calculatedBalance": { "amount": "115.00", "currency": "BRL" },
+    "ledgerBalance": { "amount": "115.00", "currency": "BRL" },
+    "difference": { "amount": "0.00", "currency": "BRL" },
+    "version": 5,
+    "ledgerVersion": 5,
+    "checkedEntries": 5,
+    "consistent": true,
+    "issues": [],
+    "checkedAt": "2026-10-22T12:00:00.000Z"
+  }
+  ```
+
+  O que é conferido, tudo em `NUMERIC` no banco (nenhum valor monetário vira `number`):
+  o saldo gravado é igual ao `balance_after` do último lançamento (`BALANCE_DIFFERS_FROM_LAST_ENTRY`);
+  é igual à soma assinada dos lançamentos a partir de zero (`BALANCE_DIFFERS_FROM_LEDGER_SUM`;
+  `difference` é gravado menos calculado); a `version` da wallet é a maior `wallet_version` do ledger
+  (`VERSION_DIFFERS_FROM_LEDGER`; sem lançamentos, a versão esperada é 1); cada `balance_before` é o
+  `balance_after` do lançamento anterior, e o primeiro parte de zero (`LEDGER_CHAIN_BROKEN`); as
+  versões são contíguas (`LEDGER_VERSION_GAP`). Os códigos de `issues` são estáveis para o
+  consumidor decidir sem ler texto.
+
+  A leitura é uma única instrução SQL, e no Postgres uma instrução enxerga um snapshot único
+  (mesmo em `READ COMMITTED`): saldo e ledger são lidos do mesmo instante, então um lançamento que
+  chega no meio da conferência não gera divergência falsa, e a leitura não bloqueia quem escreve
+  (nenhum lock; sem `FOR UPDATE`). É uma consulta direta, sem passar pelo agregado. Divergência
+  gera um log `warn` com `walletId` e `issues` (sem valores); toda conferência incrementa
+  `wagering_reconciliations_total{result}`. **A reconciliação nunca corrige nada**: o saldo só muda pelo
+  caminho do ledger, e uma divergência é um incidente para um humano investigar. Limitação: ela
+  confere a consistência interna do banco, não o que os provedores consideram o saldo certo.
 - `GET /health/live`: processo vivo, sem consultar dependências.
 - `GET /health/ready`: `SELECT 1` no Postgres e `GetQueueUrl` nas três filas, em paralelo, cada
   verificação com timeout de 2 s; `503` indicando qual dependência está `down`. O cliente SQS não

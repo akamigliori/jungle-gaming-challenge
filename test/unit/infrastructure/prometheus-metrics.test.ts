@@ -47,6 +47,17 @@ describe('PrometheusMetrics', () => {
     expect(text).toContain('wagering_dlq_messages_total{failure_code="INVALID_PAYLOAD"} 1');
   });
 
+  test('counts reconciliations by result', async () => {
+    const m = metrics();
+    m.reconciliationChecked('consistent');
+    m.reconciliationChecked('divergent');
+    m.reconciliationChecked('divergent');
+
+    const text = await m.render();
+    expect(text).toContain('wagering_reconciliations_total{result="consistent"} 1');
+    expect(text).toContain('wagering_reconciliations_total{result="divergent"} 2');
+  });
+
   test('lock conflicts use the SQLSTATE of the error and a closed set of labels', async () => {
     const m = metrics();
     m.lockConflict(Object.assign(new Error('x'), { code: '40P01' }));

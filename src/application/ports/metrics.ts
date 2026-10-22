@@ -29,6 +29,8 @@ export type ProcessingOutcome =
   | 'skipped'
   | 'error';
 
+export type ReconciliationResult = 'consistent' | 'divergent';
+
 export interface TransactionRecord {
   channel: ProcessingChannel;
   kind: WagerTransactionKind;
@@ -54,6 +56,8 @@ export interface Metrics {
   /** Erro transitório de banco (lock, deadlock, serialização, timeout, conexão). */
   lockConflict(cause: unknown): void;
   processingTimed(channel: ProcessingChannel, outcome: ProcessingOutcome, seconds: number): void;
+  /** Uma conferência de wallet terminou. */
+  reconciliationChecked(result: ReconciliationResult): void;
 }
 
 export const METRICS = Symbol('METRICS');
