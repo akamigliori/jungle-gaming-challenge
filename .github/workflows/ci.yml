@@ -45,6 +45,10 @@ jobs:
       - name: Testes de concorrência
         run: bun run test:concurrency
 
+      # três processos da aplicação com SIGKILL, SIGTERM e reinício; o mais pesado, roda por último
+      - name: Testes com múltiplas instâncias
+        run: bun run test:multi-instance
+
       - name: Logs dos containers
         if: failure()
         run: docker compose logs
