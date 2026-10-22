@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
     "check:money": "bun scripts/check-money.ts",
+    "check:architecture": "bun scripts/check-architecture.ts",
     "test": "bun test test/unit",
     "test:integration": "bun test test/integration --timeout 30000",
     "test:concurrency": "bun test test/concurrency --timeout 30000",
