@@ -79,4 +79,14 @@ describe('loadConfig SQS consumer', () => {
     expect(() => loadConfig({ SQS_WAIT_TIME_SECONDS: '21' })).toThrow();
     expect(() => loadConfig({ SQS_CONSUMER_LOOPS: '0' })).toThrow();
   });
+
+  test('shutdown timeout must cover the long poll plus its margin', () => {
+    expect(() => loadConfig({ SQS_WAIT_TIME_SECONDS: '20', SHUTDOWN_TIMEOUT_MS: '20000' })).toThrow(
+      /SHUTDOWN_TIMEOUT_MS/,
+    );
+    expect(() =>
+      loadConfig({ SQS_WAIT_TIME_SECONDS: '20', SHUTDOWN_TIMEOUT_MS: '25000' }),
+    ).not.toThrow();
+    expect(() => loadConfig({})).not.toThrow();
+  });
 });

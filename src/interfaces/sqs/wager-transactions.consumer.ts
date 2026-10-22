@@ -18,7 +18,11 @@ import {
   ProcessWagerTransactionUseCase,
 } from '../../application/wager/process-wager-transaction.use-case';
 import type { WagerTransactionKind } from '../../domain/wager/wager-transaction-kind';
-import { APP_CONFIG, type AppConfig } from '../../infrastructure/config/config';
+import {
+  APP_CONFIG,
+  type AppConfig,
+  LONG_POLL_TIMEOUT_MARGIN_MS,
+} from '../../infrastructure/config/config';
 import { safeError } from '../../infrastructure/logging/safe-error';
 import { SQS_CLIENT } from '../../infrastructure/sqs/sqs.client';
 import { failureAction } from './message-failure-policy';
@@ -28,8 +32,6 @@ export const CONSUMER_NAME = 'wager-transactions-consumer';
 
 /** Espera depois de um ciclo de recebimento com erro (SQS fora do ar, fila inexistente). */
 const RECEIVE_ERROR_BACKOFF_MS = 1000;
-/** Folga do timeout HTTP do long poll sobre o `WaitTimeSeconds`. */
-const LONG_POLL_TIMEOUT_MARGIN_MS = 5000;
 const INVALID_PAYLOAD_CODE = 'INVALID_PAYLOAD';
 /** Visibilidade 0: a mensagem devolvida no shutdown fica disponível na hora para outra instância. */
 const RELEASE_NOW_SECONDS = 0;
@@ -75,6 +77,7 @@ interface MessageLogContext {
 export class WagerTransactionsConsumer
   implements OnApplicationBootstrap, BeforeApplicationShutdown
 {
+  /** Sinaliza o desligamento; também interrompe a espera de back-off depois de um erro. */
   private readonly stop = new AbortController();
   private loops: Promise<void>[] = [];
   private queueUrls: Promise<QueueUrls> | undefined;
@@ -93,10 +96,13 @@ export class WagerTransactionsConsumer
   }
 
   /**
-   * Para de receber (aborta o long poll) e espera as mensagens em andamento por até
-   * `shutdownTimeoutMs`. As recebidas e ainda não iniciadas são devolvidas à fila pelo próprio
-   * grupo (`processGroup`). Estourado o prazo, o shutdown segue: a transação aberta é desfeita
-   * quando o pool fecha e a mensagem reaparece depois do visibility timeout.
+   * Para de iniciar novos long polls e deixa o que está em andamento terminar (no máximo
+   * `waitTimeSeconds`). As mensagens que ele devolver e as recebidas que ainda não começaram voltam
+   * à fila com visibilidade 0 pelo próprio grupo (`processGroup`); as em andamento são esperadas por
+   * até `shutdownTimeoutMs`. O long poll não é abortado porque o SQS pode responder a uma requisição
+   * que o cliente já abandonou: a mensagem ficaria escondida até o visibility timeout, com uma
+   * recepção a mais na contagem para a DLQ. Estourado o prazo, o shutdown segue: a transação aberta
+   * é desfeita quando o pool fecha e a mensagem reaparece depois do visibility timeout.
    */
   async beforeApplicationShutdown(): Promise<void> {
     this.stop.abort();
@@ -144,11 +150,9 @@ export class WagerTransactionsConsumer
         WaitTimeSeconds: waitTimeSeconds,
         MessageSystemAttributeNames: ['ApproximateReceiveCount', 'MessageGroupId'],
       }),
-      // o timeout por chamada substitui o do cliente (1,5 s), que derrubaria o long poll
-      {
-        abortSignal: this.stop.signal,
-        requestTimeout: waitTimeSeconds * 1000 + LONG_POLL_TIMEOUT_MARGIN_MS,
-      },
+      // o timeout por chamada substitui o do cliente (1,5 s), que derrubaria o long poll; sem
+      // abortSignal: no shutdown o long poll em andamento termina normalmente
+      { requestTimeout: waitTimeSeconds * 1000 + LONG_POLL_TIMEOUT_MARGIN_MS },
     );
     return Messages;
   }
@@ -163,7 +167,7 @@ export class WagerTransactionsConsumer
   /**
    * Mensagens do grupo uma de cada vez. A primeira que fica na fila encerra o grupo neste lote:
    * as seguintes voltam com o mesmo atraso dela e são recebidas de novo atrás dela, na ordem FIFO.
-   * No shutdown, as que ainda não começaram voltam na hora (visibilidade 0).
+   * No shutdown, as que ainda não começaram voltam com visibilidade 0 assim que o grupo chega nelas.
    */
   private async processGroup(group: Message[], urls: QueueUrls): Promise<void> {
     for (const [index, message] of group.entries()) {

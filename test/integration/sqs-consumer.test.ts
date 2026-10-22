@@ -1,5 +1,10 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
-import { DeleteMessageCommand, type Message, type SQSClient } from '@aws-sdk/client-sqs';
+import {
+  DeleteMessageCommand,
+  type Message,
+  ReceiveMessageCommand,
+  type SQSClient,
+} from '@aws-sdk/client-sqs';
 import { LockWaitTimeoutException } from '@mikro-orm/core';
 import { EntityManager, type MikroORM } from '@mikro-orm/postgresql';
 import {
@@ -141,6 +146,7 @@ beforeAll(async () => {
     SQS_TRANSACTIONS_QUEUE: queues.transactions,
     SQS_TRANSACTIONS_DLQ: queues.transactionsDlq,
     SQS_EVENTS_QUEUE: queues.events,
+    SQS_WAIT_TIME_SECONDS: '1',
   });
 });
 
@@ -264,6 +270,10 @@ const SLOW_LOCK_MS = 1500;
 /** Visibility longo: o que voltar para a fila antes disso foi devolvido pelo consumer. */
 const LONG_VISIBILITY_TIMEOUT_SECONDS = 30;
 const SHORT_WAIT_TIME_SECONDS = 1;
+/** Long poll que ainda está aberto quando o shutdown começa. */
+const SHUTDOWN_POLL_WAIT_TIME_SECONDS = 2;
+/** Folga para o shutdown chegar ao consumer (os hooks anteriores do Nest rodam antes). */
+const SHUTDOWN_STARTED_MS = 300;
 
 const lockTimeout = () =>
   new LockWaitTimeoutException(Object.assign(new Error('lock timeout'), { code: '55P03' }));
@@ -308,6 +318,29 @@ const swallowDeletes: OverrideProviders = (builder) =>
     },
   });
 
+/** Cliente SQS real que avisa quando o primeiro long poll é enviado. */
+function notifyFirstReceive(onReceive: () => void): OverrideProviders {
+  return (builder) =>
+    builder.overrideProvider(SQS_CLIENT).useFactory({
+      inject: [APP_CONFIG],
+      factory: (config: AppConfig): SQSClient => {
+        const sqs = createSqsClient(config);
+        return new Proxy(sqs, {
+          get(target, property) {
+            if (property !== 'send') return Reflect.get(target, property, target);
+            return (command: unknown, options?: unknown) => {
+              if (command instanceof ReceiveMessageCommand) onReceive();
+              return (target.send as (c: unknown, o?: unknown) => Promise<unknown>)(
+                command,
+                options,
+              );
+            };
+          },
+        });
+      },
+    });
+}
+
 async function wagerRows(walletId: string) {
   return sql<{ external_transaction_id: string; status: string; failure_code: string | null }>(
     'SELECT external_transaction_id, status, failure_code FROM wager_transactions WHERE wallet_id = ? AND kind = ? ORDER BY created_at, id',
@@ -326,17 +359,19 @@ describe('SQS consumer — order, retries, crash and shutdown', () => {
   }
 
   /** Instância com o consumer ligado nas filas `q`; as mensagens já devem estar na fila. */
-  async function startConsumer(q: TestQueues, overrides?: OverrideProviders): Promise<TestApp> {
+  async function startConsumer(
+    q: TestQueues,
+    overrides?: OverrideProviders,
+    waitTimeSeconds = SHORT_WAIT_TIME_SECONDS,
+  ): Promise<TestApp> {
     const app = await createTestApp(
       {
         SQS_CONSUMER_ENABLED: 'true',
         SQS_TRANSACTIONS_QUEUE: q.transactions,
         SQS_TRANSACTIONS_DLQ: q.transactionsDlq,
         SQS_EVENTS_QUEUE: q.events,
-        // um long poll abortado no shutdown ainda pode ser atendido pelo SQS e "receber" uma
-        // mensagem que ninguém vai ler; com espera curta, isso acaba antes de os testes a
-        // devolverem à fila
-        SQS_WAIT_TIME_SECONDS: String(SHORT_WAIT_TIME_SECONDS),
+        // o shutdown espera o long poll em andamento terminar: espera curta deixa o app.close() rápido
+        SQS_WAIT_TIME_SECONDS: String(waitTimeSeconds),
       },
       overrides,
     );
@@ -516,5 +551,35 @@ describe('SQS consumer — order, retries, crash and shutdown', () => {
     await waitProcessed(unstarted.externalTransactionId);
     await waitQueueEmpty(q);
     expect(await balanceOf(walletId)).toBe('50.00');
+  });
+
+  test('shutdown lets the long poll in progress finish: a message it receives goes back visible', async () => {
+    const q = await newQueues(LONG_VISIBILITY_TIMEOUT_SECONDS);
+    const walletId = await createWallet();
+    const data = betData(walletId);
+    const polling = Promise.withResolvers<void>();
+
+    const stopping = await startConsumer(
+      q,
+      notifyFirstReceive(() => polling.resolve()),
+      SHUTDOWN_POLL_WAIT_TIME_SECONDS,
+    );
+    await polling.promise;
+    // a mensagem chega com o shutdown já em curso, bem antes de o long poll de 2 s vencer: ou ele a
+    // recebe e o grupo a devolve com visibilidade 0, ou o laço já parou e ela nem é recebida
+    const closing = stop(stopping);
+    await Bun.sleep(SHUTDOWN_STARTED_MS);
+    await q.send(envelope(data), { groupId: walletId });
+    await closing;
+
+    // um long poll abortado poderia recebê-la sem ninguém ler: ficaria escondida por 30 s
+    expect(await transactionsOf(data.externalTransactionId)).toEqual([]);
+    expect(await q.depth('transactions')).toBe(1);
+    expect(await q.visible('transactions')).toBe(1);
+
+    await startConsumer(q);
+    await waitProcessed(data.externalTransactionId);
+    await waitQueueEmpty(q);
+    expect(await balanceOf(walletId)).toBe('75.00');
   });
 });
