@@ -48,7 +48,8 @@ export function decideWager(p: {
 }): WagerDecision {
   const { tx, wallet } = p;
   if (tx.playerId !== wallet.playerId) return reject(p, 'PLAYER_MISMATCH');
-  if (tx.money.currency !== wallet.currency) return reject(p, 'CURRENCY_MISMATCH');
+  // Saldo de outra moeda não é observável na moeda da transação: rejeita sem snapshot.
+  if (tx.money.currency !== wallet.currency) return reject(p, 'CURRENCY_MISMATCH', false);
 
   const check = checkReference(p);
   if (!check.ok) return check.decision;
@@ -147,10 +148,14 @@ function processed(
 function reject(
   p: { tx: WagerTransaction; wallet: Wallet; at: Date },
   code: FailureCode,
+  observeBalance = true,
 ): WagerDecision {
-  p.tx.reject(code, p.at, {
-    balanceAfter: p.wallet.balance,
-    walletVersionAfter: p.wallet.version,
-  });
+  p.tx.reject(
+    code,
+    p.at,
+    observeBalance
+      ? { balanceAfter: p.wallet.balance, walletVersionAfter: p.wallet.version }
+      : undefined,
+  );
   return { outcome: 'REJECTED', code };
 }
