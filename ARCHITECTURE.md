@@ -724,8 +724,7 @@ na mensagem passa pelas mesmas validações de domínio.
   | `wagering_lock_conflicts_total` | `code` (`55P03`, `40P01`, `40001`, `57014`, `connection`, `other`) | Há disputa de lock, deadlock ou timeout no banco? O rótulo `connection` agrupa as falhas de conexão (banco fora), que seguem a mesma política de retry. Contado onde o erro transitório é classificado, a cada ocorrência (inclusive a que esgota as tentativas). |
   | `wagering_outbox_pending` | (gauge) | Quantos eventos já confirmados no banco ainda não foram publicados? |
   | `wagering_outbox_lag_seconds` | (gauge) | Há quanto tempo o evento pendente mais antigo espera? Cresce se o SQS cai ou um evento trava em retry. |
-  | `wagering_reconciliations_total` | `result` (`consistent`, `divergent`) | Quantas conferências de wallet foram feitas e quantas acharam divergência? |
-  | `wagering_reconciliation_divergences_total` | (contador) | Alguma wallet divergiu do ledger? Qualquer aumento merece alerta. |
+  | `wagering_reconciliations_total` | `result` (`consistent`, `divergent`) | Quantas conferências de wallet foram feitas e quantas acharam divergência? Alertar em qualquer aumento de `result="divergent"`. |
   | `wagering_processing_duration_seconds` | histograma por `channel` e `outcome` (`processed`, `rejected`, `pending`, `replay`, `conflict`, `resolved`, `rescheduled`, `skipped`, `error`; `error` inclui erros do cliente, como payload inválido ou wallet inexistente) | Quanto tempo o caso de uso leva (transação inteira, com lock e retries), por canal e resultado? |
 
   As métricas são **por instância**: contadores locais em memória, que não participam de nenhuma
@@ -764,12 +763,12 @@ na mensagem passa pelas mesmas validações de domínio.
   versões são contíguas (`LEDGER_VERSION_GAP`). Os códigos de `issues` são estáveis para o
   consumidor decidir sem ler texto.
 
-  A leitura roda numa transação `REPEATABLE READ` somente leitura: o saldo e o ledger saem do mesmo
-  snapshot, então um lançamento que chega no meio da conferência não gera divergência falsa, e a
-  leitura não bloqueia quem escreve (nenhum lock; sem `FOR UPDATE`). É uma consulta direta, sem
-  passar pelo agregado. Divergência gera um log `warn` com `walletId` e `issues` (sem valores) e
-  incrementa `wagering_reconciliation_divergences_total`; toda conferência incrementa
-  `wagering_reconciliations_total`. **A reconciliação nunca corrige nada**: o saldo só muda pelo
+  A leitura é uma única instrução SQL, e no Postgres uma instrução enxerga um snapshot único
+  (mesmo em `READ COMMITTED`): saldo e ledger são lidos do mesmo instante, então um lançamento que
+  chega no meio da conferência não gera divergência falsa, e a leitura não bloqueia quem escreve
+  (nenhum lock; sem `FOR UPDATE`). É uma consulta direta, sem passar pelo agregado. Divergência
+  gera um log `warn` com `walletId` e `issues` (sem valores); toda conferência incrementa
+  `wagering_reconciliations_total{result}`. **A reconciliação nunca corrige nada**: o saldo só muda pelo
   caminho do ledger, e uma divergência é um incidente para um humano investigar. Limitação: ela
   confere a consistência interna do banco, não o que os provedores consideram o saldo certo.
 - `GET /health/live`: processo vivo, sem consultar dependências.
