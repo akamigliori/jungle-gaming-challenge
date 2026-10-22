@@ -5,6 +5,7 @@ import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { z } from 'zod';
 import { TransientFailureError } from '../../../src/application/shared/retry-transient';
 import {
+  DomainError,
   InvalidMoneyError,
   InvariantViolationError,
 } from '../../../src/domain/shared/domain-error';
@@ -48,6 +49,17 @@ describe('HttpErrorFilter', () => {
     expect(c.status).toBe(422);
     expect(c.body).toEqual({
       error: { code: 'INSUFFICIENT_FUNDS', message: 'insufficient funds', retryable: false },
+    });
+  });
+
+  test('DomainError mapped to 5xx never echoes its message', () => {
+    class BrokenDependencyError extends DomainError {
+      readonly code = 'INTERNAL_ERROR' as const;
+    }
+    const c = run(new BrokenDependencyError('secret connection detail'));
+    expect(c.status).toBe(500);
+    expect(c.body).toEqual({
+      error: { code: 'INTERNAL_ERROR', message: 'Internal server error', retryable: false },
     });
   });
 
