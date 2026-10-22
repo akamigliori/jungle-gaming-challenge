@@ -64,14 +64,15 @@ export class MikroOrmWalletRepository implements WalletRepository {
 /** Tempo máximo esperando o lock de uma wallet antes de falhar com erro transitório. */
 const LOCK_TIMEOUT = '2s';
 
+/** Linha crua do `SELECT ... FOR UPDATE`: o driver devolve `TIMESTAMPTZ` como texto em SQL direto. */
 interface WalletRow {
   id: string;
   player_id: string;
   currency: string;
   balance: string;
   version: number;
-  created_at: Date;
-  updated_at: Date;
+  created_at: string | Date;
+  updated_at: string | Date;
 }
 
 function fromRow(r: WalletRow): WalletRecord {
@@ -81,8 +82,8 @@ function fromRow(r: WalletRow): WalletRecord {
     currency: r.currency,
     balance: r.balance,
     version: r.version,
-    createdAt: r.created_at,
-    updatedAt: r.updated_at,
+    createdAt: new Date(r.created_at),
+    updatedAt: new Date(r.updated_at),
   };
 }
 

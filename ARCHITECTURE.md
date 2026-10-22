@@ -24,7 +24,7 @@ Princípios:
 src/
   domain/          regras de negócio puras (sem framework, ORM, validação externa ou node:*)
   application/     casos de uso e portas (repositórios, TransactionRunner, IdGenerator, Clock)
-  infrastructure/  adaptadores: config, MikroORM, SQS, logs, auth, ids, relógio
+  infrastructure/  adaptadores: config, MikroORM, SQS, logs, auth, ids, relógio, workers
   interfaces/      entrada HTTP: controllers, filtro de erros, mapeamento de status
 ```
 
@@ -287,11 +287,82 @@ grava linhas soltas de propósito para provocar cada constraint).
   gravada. Se não foi, o reenvio processa normalmente; se foi, o reenvio encontra a original e
   devolve um replay. Em qualquer caso existe exatamente um efeito no saldo e no ledger.
 
-## 11. Ordem dos eventos
+## 11. Outbox e publicação de eventos
 
-Os eventos entram na outbox na mesma transação SQL do saldo e do ledger, então nenhum evento é
-publicado antes do commit. A ordem de publicação por wallet é **melhor esforço**: com vários
-publishers e retries, eventos da mesma wallet podem sair fora de ordem. Por isso
+**Gravação.** Os eventos entram na tabela `outbox_messages` na mesma transação SQL do saldo, do
+ledger e da transação de aposta. Se a transação faz rollback, o evento não existe; se faz commit,
+ele fica gravado mesmo que o processo morra no instante seguinte. Nada é enviado à fila de dentro
+da transação: o envio só acontece depois, a partir do que já está confirmado no banco.
+
+**Publisher.** Cada instância roda um loop (`OutboxPublisherWorker`) que chama
+`PublishOutboxUseCase.runOnce()` a cada `OUTBOX_POLL_INTERVAL_MS` (250 ms). Um ciclo:
+
+1. **Reserva** (transação curta e própria):
+   `SELECT ... FROM outbox_messages WHERE published_at IS NULL AND next_attempt_at <= $agora
+   ORDER BY occurred_at, id LIMIT $lote FOR UPDATE SKIP LOCKED` e, na mesma transação,
+   `next_attempt_at = $agora + lease` (30 s) para as linhas escolhidas; `COMMIT`.
+2. **Publica** fora de qualquer transação, em `wagering-events.fifo`, com
+   `MessageGroupId = aggregateId` (a wallet) e `MessageDeduplicationId = eventId`; o corpo é o
+   envelope JSON gravado no `payload`. Eventos da mesma wallet saem um de cada vez, na ordem do
+   lote; wallets diferentes saem em paralelo.
+3. **Registra** o resultado, em escritas curtas e separadas: sucesso →
+   `UPDATE ... SET published_at = $agora WHERE id = $id AND published_at IS NULL`; falha →
+   `attempts + 1`, `next_attempt_at` com backoff exponencial e jitter (1 s, 2 s, 4 s ... até 5 min)
+   e `last_error` (até 500 caracteres). Uma falha não impede as outras wallets do lote, mas para a
+   wallet dela neste ciclo: as mensagens seguintes da mesma wallet são adiadas para o mesmo
+   horário da nova tentativa, sem contar tentativa, para não saírem antes da que falhou.
+   As duas escritas só valem enquanto a reserva ainda é de quem escreve
+   (`next_attempt_at <= fim do lease reservado`): se o lease venceu e outra instância reservou a
+   linha de novo, uma falha atrasada não sobrescreve o lease nem o `attempts` dela.
+
+Lote cheio publicado → o próximo ciclo começa na hora (ainda há fila); ciclo com falhas espera o
+intervalo normal, para não varrer a outbox sem pausa enquanto o SQS está fora. Erro no ciclo (banco fora, por
+exemplo) é logado, sem o conteúdo dos eventos, e o loop continua. No shutdown, o worker para antes
+de o pool do Postgres e o cliente SQS serem fechados e espera o ciclo em andamento terminar.
+
+**Por que `SKIP LOCKED` + lease, sem coluna nova.** `SKIP LOCKED` faz duas instâncias reservando
+ao mesmo tempo pegarem linhas diferentes, sem uma esperar a outra. Empurrar o `next_attempt_at`
+para o futuro no mesmo commit tira o lote da consulta das demais depois que o lock é solto; ele
+funciona como um "aluguel" com prazo. Se a instância morrer com o lote reservado, ninguém precisa
+limpar nada: quando o prazo vence, as linhas voltam a satisfazer `next_attempt_at <= agora` e
+outra instância as pega. A alternativa — uma coluna `claimed_by`/`claimed_at` — precisaria da mesma
+lógica de expiração e de uma migration, sem ganho. A publicação fica fora da transação para não
+segurar locks e conexões do banco durante uma chamada de rede.
+
+**Garantia: at-least-once.** Um evento nunca é perdido (só é marcado depois que o SQS confirmou o
+envio) e nunca sai antes do commit (o publisher só enxerga linhas confirmadas). Ele pode sair mais
+de uma vez quando o processo morre entre publicar e marcar, ou quando um envio demora mais que o
+lease e outra instância reserva a mesma linha. Duas defesas: o SQS FIFO descarta reenvios com o
+mesmo `MessageDeduplicationId` dentro da janela de 5 minutos; fora dela, o consumidor deduplica
+pelo `eventId`. A marcação com `published_at IS NULL` torna inofensiva a corrida de dois
+publishers marcando a mesma linha.
+
+**Cenário de crash exigido pelo enunciado, passo a passo:**
+
+1. a transação de aposta faz `COMMIT`: saldo, ledger e evento gravados juntos;
+2. a instância A reserva o lote (o evento ganha `next_attempt_at = agora + 30 s`) e morre antes de
+   publicar — ou antes de marcar `published_at`;
+3. durante o lease, as outras instâncias não pegam o evento (não está vencido); vencido o prazo,
+   a instância B o reserva no seu ciclo normal;
+4. B publica e marca `published_at`;
+5. se A tinha chegado a publicar, o evento sai duas vezes com o mesmo `eventId`: o SQS descarta a
+   segunda dentro da janela de deduplicação e, fora dela, o consumidor a ignora pelo `eventId`.
+
+Os testes de integração (`test/integration/outbox-publisher.test.ts`, Postgres e LocalStack reais)
+cobrem: publicação única e marcação; segunda execução não republica; falha no envio
+(`attempts = 1`, nova tentativa no futuro, `last_error`, demais wallets publicadas); falha parando
+a wallet no ciclo e publicando-a em ordem no seguinte; falha atrasada que não sobrescreve a reserva
+de outra instância; dois
+publishers concorrentes sobre 100 eventos (todos recebidos, cada linha reservada por um único
+publisher, nenhuma pendente); reserva abandonada não é pega antes do lease e é publicada depois; e
+o worker ligado publicando os eventos de uma wallet nova de ponta a ponta. Os testes controlam o
+relógio (`Clock` injetado) para avançar além do lease sem esperar.
+
+**Ordem: melhor esforço.** Dentro de um ciclo, eventos da mesma wallet saem na ordem gravada, e o
+`MessageGroupId` por wallet mantém essa ordem dentro da fila FIFO. Uma falha não inverte a ordem
+num mesmo publisher: a wallet para no evento que falhou e os seguintes voltam junto com ele. Mas,
+com vários publishers, eventos da mesma wallet ainda podem sair fora de ordem (dois lotes da mesma
+wallet reservados por instâncias diferentes; um lease vencido no meio de um envio lento). Por isso
 `WalletBalanceChanged` carrega `walletVersion`, que o consumidor usa para ordenar ou descartar
 eventos antigos. A garantia final de ordem é o `wallet_version` do ledger, não a fila.
 
@@ -332,6 +403,15 @@ na mensagem passa pelas mesmas validações de domínio.
 - Autenticação ainda não implementada (ver seção 12).
 - Transações `PENDING_REFERENCE` são gravadas e respondidas com `202`, mas ainda não há um
   processo que as reprocesse quando a referência chega.
+- O publisher da outbox tenta indefinidamente (backoff até 5 min) e não tem DLQ própria: um evento
+  que nunca consegue ser publicado fica pendente, com `attempts` e `last_error` visíveis na tabela.
+- O lease usa o relógio de cada instância (`Clock`), não o do banco: relógios das instâncias
+  precisam estar sincronizados (NTP) com folga bem menor que o lease de 30 s. Um desvio maior só
+  causa publicação duplicada (tratada pela deduplicação), nunca perda.
+- Um lote reservado é publicado em sequência por wallet; se o SQS ficar lento (no pior caso cerca
+  de 2,5 s por envio: 1 s para abrir a conexão mais 1,5 s esperando a resposta) e uma wallet tiver
+  muitos eventos no mesmo lote, o envio pode passar do lease e outra instância reservar as mesmas
+  linhas — resultado: duplicatas, absorvidas pela deduplicação.
 - `@mikro-orm/nestjs` 6.1.2 declara peer dependencies para Nest `^10 || ^11`, e o projeto roda
   Nest 12. A integração funciona e é coberta pelos testes de integração; se uma versão futura
   quebrar, a alternativa é registrar à mão um provider de `MikroORM` (`MikroORM.init` +
@@ -339,6 +419,8 @@ na mensagem passa pelas mesmas validações de domínio.
 
 ## 15. Próximos passos
 
+- **Métrica de outbox lag** (idade do evento pendente mais antigo) e de falhas de publicação, para
+  alertar quando o SQS estiver fora ou um evento travar em retry.
 - **Ordem estrita de eventos por wallet**: publicar por agregado em ordem de `wallet_version`
   (coluna de sequência na outbox e claim por agregado), em vez do melhor esforço atual.
 - **Visibility timeout do SQS maior que o pior caso do processamento**: uma mensagem pode levar
