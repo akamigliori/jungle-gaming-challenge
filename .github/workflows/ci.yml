@@ -39,6 +39,9 @@ jobs:
       - name: Testes de integração
         run: bun run test:integration
 
+      - name: Testes de concorrência
+        run: bun run test:concurrency
+
       - name: Logs dos containers
         if: failure()
         run: docker compose logs
