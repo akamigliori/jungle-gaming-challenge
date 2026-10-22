@@ -512,6 +512,7 @@ describe('ProcessWagerTransactionUseCase — inbox', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]?.message_id).toBe('msg-1');
     expect(rows[0]?.processed_at).not.toBeNull();
+    expect(rows[0]?.processed_at).toEqual(rows[0]?.received_at as Date);
     expect(await counts()).toEqual({ transactions: 1, ledger: 2, outbox: 4 });
   });
 

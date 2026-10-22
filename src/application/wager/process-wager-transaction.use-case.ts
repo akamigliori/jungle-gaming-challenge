@@ -3,6 +3,7 @@ import { WagerTransactionPendingReference } from '../../domain/events/wager-tran
 import { WagerTransactionProcessed } from '../../domain/events/wager-transaction-processed';
 import { WagerTransactionRejected } from '../../domain/events/wager-transaction-rejected';
 import { WalletBalanceChanged } from '../../domain/events/wallet-balance-changed';
+import { InboxMessage } from '../../domain/messaging/inbox-message';
 import { OutboxMessage } from '../../domain/messaging/outbox-message';
 import { InvalidPayloadError, InvariantViolationError } from '../../domain/shared/domain-error';
 import { Money, type MoneyProps } from '../../domain/shared/money';
@@ -75,9 +76,9 @@ interface ValidatedWager {
 }
 
 /**
- * Processa BET, WIN, LOSS, REFUND e ROLLBACK numa única transação SQL: trava a wallet,
- * registra a inbox, verifica a idempotência, aplica as regras e grava inbox, wallet, transação, ledger e outbox juntos.
- * Ponto de entrada único para HTTP e SQS.
+ * Processa BET, WIN, LOSS, REFUND e ROLLBACK numa única transação SQL: trava a wallet, registra a
+ * inbox, verifica a idempotência, aplica as regras e grava wallet, transação, ledger e outbox
+ * juntos. Ponto de entrada único para HTTP e SQS.
  */
 export class ProcessWagerTransactionUseCase {
   constructor(private readonly deps: ProcessWagerDeps) {}
@@ -140,7 +141,11 @@ export class ProcessWagerTransactionUseCase {
       // Duplicata segue adiante e cai no replay pela chave de idempotência (a entrega é uma
       // coisa, a operação de negócio é outra); outro corpo com o mesmo messageId é conflito.
       if (cmd.inbox) {
-        const delivery = await inbox.register(cmd.inbox, clock.now());
+        const receivedAt = clock.now();
+        const message = InboxMessage.receive({ ...cmd.inbox, receivedAt });
+        // a linha só existe se o processamento commitar: recebida e processada no mesmo instante
+        message.markProcessed(receivedAt);
+        const delivery = await inbox.register(message);
         if (delivery === 'conflict') {
           throw new IdempotencyConflictError('messageId already used with a different payload');
         }
