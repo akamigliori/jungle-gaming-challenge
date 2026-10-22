@@ -3,6 +3,7 @@ import { CLOCK, type Clock } from './application/ports/clock';
 import { ID_GENERATOR, type IdGenerator } from './application/ports/id-generator';
 import { INBOX_REPOSITORY, type InboxRepository } from './application/ports/inbox.repository';
 import { LEDGER_REPOSITORY, type LedgerRepository } from './application/ports/ledger.repository';
+import { METRICS, type Metrics } from './application/ports/metrics';
 import { OUTBOX_REPOSITORY, type OutboxRepository } from './application/ports/outbox.repository';
 import { TRANSACTION_RUNNER, type TransactionRunner } from './application/ports/transaction-runner';
 import {
@@ -41,6 +42,7 @@ import { WagerTransactionsConsumer } from './interfaces/sqs/wager-transactions.c
         OUTBOX_REPOSITORY,
         ID_GENERATOR,
         CLOCK,
+        METRICS,
         APP_CONFIG,
       ],
       useFactory: (
@@ -52,6 +54,7 @@ import { WagerTransactionsConsumer } from './interfaces/sqs/wager-transactions.c
         outbox: OutboxRepository,
         ids: IdGenerator,
         clock: Clock,
+        metrics: Metrics,
         config: AppConfig,
       ) =>
         new ProcessWagerTransactionUseCase({
@@ -63,6 +66,7 @@ import { WagerTransactionsConsumer } from './interfaces/sqs/wager-transactions.c
           outbox,
           ids,
           clock,
+          metrics,
           isTransient: isTransientDbError,
           isUniqueViolation: isWagerUniqueViolation,
           referenceRetry: config.pendingReference.retry,
@@ -78,6 +82,7 @@ import { WagerTransactionsConsumer } from './interfaces/sqs/wager-transactions.c
         OUTBOX_REPOSITORY,
         ID_GENERATOR,
         CLOCK,
+        METRICS,
         APP_CONFIG,
       ],
       useFactory: (
@@ -88,6 +93,7 @@ import { WagerTransactionsConsumer } from './interfaces/sqs/wager-transactions.c
         outbox: OutboxRepository,
         ids: IdGenerator,
         clock: Clock,
+        metrics: Metrics,
         config: AppConfig,
       ) =>
         new ResolvePendingReferenceUseCase({
@@ -98,6 +104,7 @@ import { WagerTransactionsConsumer } from './interfaces/sqs/wager-transactions.c
           outbox,
           ids,
           clock,
+          metrics,
           isTransient: isTransientDbError,
           referenceRetry: config.pendingReference.retry,
         }),

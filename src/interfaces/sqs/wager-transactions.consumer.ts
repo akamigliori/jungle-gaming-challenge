@@ -12,6 +12,7 @@ import type { BeforeApplicationShutdown, OnApplicationBootstrap } from '@nestjs/
 import { Inject, Injectable } from '@nestjs/common';
 import { InjectPinoLogger, type PinoLogger } from 'nestjs-pino';
 import { CLOCK, type Clock } from '../../application/ports/clock';
+import { METRICS, type Metrics } from '../../application/ports/metrics';
 import {
   type ProcessWagerCommand,
   type ProcessWagerResult,
@@ -90,6 +91,7 @@ export class WagerTransactionsConsumer
     @Inject(SQS_CLIENT) private readonly sqs: SQSClient,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
     @Inject(CLOCK) private readonly clock: Clock,
+    @Inject(METRICS) private readonly metrics: Metrics,
     @InjectPinoLogger(WagerTransactionsConsumer.name) private readonly logger: ConsumerLogger,
   ) {}
 
@@ -279,6 +281,7 @@ export class WagerTransactionsConsumer
       return { left: true };
     }
     await this.changeVisibility(message, action.delaySeconds, urls);
+    this.metrics.retryScheduled('sqs_visibility');
     this.logger.warn(
       { ...context, err: safeError(error), retryInSeconds: action.delaySeconds },
       'wager message will be retried',
@@ -317,6 +320,7 @@ export class WagerTransactionsConsumer
         },
       }),
     );
+    this.metrics.messageDeadLettered(failureCode);
     await this.ack(message, urls.transactions);
   }
 

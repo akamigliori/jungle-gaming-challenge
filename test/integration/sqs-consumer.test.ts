@@ -136,6 +136,10 @@ async function waitDeadLetters(count: number, q: TestQueues = queues): Promise<M
   return received;
 }
 
+async function scrapeMetrics(): Promise<string> {
+  return (await fetch(`${t.baseUrl}/metrics`)).text();
+}
+
 const failureCodeOf = (m: Message | undefined) => m?.MessageAttributes?.failureCode?.StringValue;
 
 beforeAll(async () => {
@@ -197,6 +201,11 @@ describe('SQS consumer', () => {
     expect(await inboxRows(message.messageId)).toBe(1);
     expect(await balanceOf(walletId)).toBe('75.00');
     expect(await queues.receiveAll('transactionsDlq')).toEqual([]);
+    const metrics = await scrapeMetrics();
+    expect(metrics).toContain('wagering_duplicates_total{type="inbox_redelivery"} 1');
+    expect(metrics).toMatch(
+      /^wagering_transactions_total\{channel="sqs",kind="BET",status="PROCESSED"\} \d+$/m,
+    );
   });
 
   test('the same messageId with a different payload goes to the DLQ as IDEMPOTENCY_CONFLICT', async () => {
@@ -220,6 +229,9 @@ describe('SQS consumer', () => {
     await waitQueueEmpty();
     expect(await debitsOf(walletId)).toBe(1);
     expect(await balanceOf(walletId)).toBe('75.00');
+    const metrics = await scrapeMetrics();
+    expect(metrics).toContain('wagering_duplicates_total{type="inbox_conflict"} 1');
+    expect(metrics).toContain('wagering_dlq_messages_total{failure_code="IDEMPOTENCY_CONFLICT"} 1');
   });
 
   test('invalid messages go to the DLQ on the first delivery and nothing is written', async () => {

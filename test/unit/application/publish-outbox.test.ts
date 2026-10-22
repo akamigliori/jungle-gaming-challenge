@@ -6,6 +6,7 @@ import type {
   OutboxRepository,
 } from '../../../src/application/ports/outbox.repository';
 import { OutboxMessage } from '../../../src/domain/messaging/outbox-message';
+import { noopMetrics } from '../../support/noop-metrics';
 
 const now = new Date('2026-10-21T12:00:00Z');
 
@@ -72,6 +73,7 @@ function useCase(outbox: OutboxRepository, publisher: EventPublisher) {
     outbox,
     publisher,
     clock: { now: () => now },
+    metrics: noopMetrics,
     batchSize: 50,
     leaseMs: 30_000,
     random: () => 1,

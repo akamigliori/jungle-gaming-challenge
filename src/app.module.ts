@@ -8,6 +8,7 @@ import { InfrastructureModule } from './infrastructure/infrastructure.module';
 import { HealthController } from './interfaces/http/health.controller';
 import { HttpErrorFilter } from './interfaces/http/http-error.filter';
 import { MessagingModule } from './messaging.module';
+import { MetricsModule } from './metrics.module';
 import { PersistenceModule } from './persistence.module';
 import { WageringModule } from './wagering.module';
 import { WalletModule } from './wallet.module';
@@ -21,6 +22,7 @@ export class AppModule {
       imports: [
         InfrastructureModule.forRoot(config, logDestination),
         PersistenceModule,
+        MetricsModule,
         WalletModule,
         WageringModule,
         MessagingModule,
