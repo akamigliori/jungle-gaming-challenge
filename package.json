@@ -1,6 +1,6 @@
 {
   "name": "jungle-gaming-challenge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,8 +8,11 @@
     "start": "bun src/main.ts",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
+    "check:money": "bun scripts/check-money.ts",
+    "check:architecture": "bun scripts/check-architecture.ts",
     "test": "bun test test/unit",
     "test:integration": "bun test test/integration --timeout 30000",
+    "test:concurrency": "bun test test/concurrency --timeout 30000",
     "migration:up": "bun scripts/migrate.ts up",
     "migration:down": "bun scripts/migrate.ts down"
   },

@@ -3,6 +3,7 @@ import { ConnectionException } from '@mikro-orm/core';
 import type { ArgumentsHost } from '@nestjs/common';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { z } from 'zod';
+import { TransientFailureError } from '../../../src/application/shared/retry-transient';
 import {
   InvalidMoneyError,
   InvariantViolationError,
@@ -114,6 +115,19 @@ describe('HttpErrorFilter', () => {
     });
   });
 
+  test('TransientFailureError → 503 with Retry-After, without echoing the cause', () => {
+    const c = run(new TransientFailureError(new Error('canceling statement due to lock timeout')));
+    expect(c.status).toBe(503);
+    expect(c.headers['Retry-After']).toBeDefined();
+    expect(c.body).toEqual({
+      error: {
+        code: 'SERVICE_UNAVAILABLE',
+        message: 'Service temporarily unavailable',
+        retryable: true,
+      },
+    });
+  });
+
   test('raw ECONNREFUSED → 503', () => {
     const err = Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' });
     expect(run(err).status).toBe(503);
@@ -133,5 +147,22 @@ describe('HttpErrorFilter', () => {
     const c = run(new InsufficientFundsError('insufficient funds'));
     expect(c.logs).toHaveLength(1);
     expect(c.logs[0]?.level).not.toBe('error');
+  });
+
+  test('5xx log keeps only safe driver fields, never the query or its values', () => {
+    const driver = Object.assign(
+      new Error(
+        "INSERT INTO wallets (player_id, balance) VALUES ('player-secret', '123.45') - new row violates check constraint",
+      ),
+      { code: '23514', constraint: 'wallets_balance_non_negative', table: 'wallets' },
+    );
+    const c = run(new TransientFailureError(driver));
+
+    expect(c.status).toBeGreaterThanOrEqual(500);
+    const logged = JSON.stringify(c.logs[0]?.obj);
+    expect(logged).toContain('23514');
+    expect(logged).toContain('wallets_balance_non_negative');
+    expect(logged).not.toContain('player-secret');
+    expect(logged).not.toContain('123.45');
   });
 });

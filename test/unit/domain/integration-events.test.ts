@@ -131,7 +131,7 @@ describe('integration events', () => {
 
   test('WagerTransactionPendingReference carries the missing reference', () => {
     const tx = newTx(WagerTransactionKind.Refund, 'ext0');
-    tx.markPendingReference();
+    tx.markPendingReference({ nextAttemptAt: new Date('2026-01-01T00:00:02Z') });
     const event = WagerTransactionPendingReference.from(tx, ctx);
     expect(event.eventType).toBe('WagerTransactionPendingReference');
     expect(event.version).toBe(1);
@@ -147,7 +147,7 @@ describe('integration events', () => {
 
   test('each event subclass exposes its eventType on the type, not passed by caller', () => {
     const tx = newTx(WagerTransactionKind.Refund, 'ext0');
-    tx.markPendingReference();
+    tx.markPendingReference({ nextAttemptAt: new Date('2026-01-01T00:00:02Z') });
     const event = WagerTransactionPendingReference.from(tx, ctx);
     const type: 'WagerTransactionPendingReference' = event.eventType;
     const version: 1 = event.version;

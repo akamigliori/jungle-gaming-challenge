@@ -1,10 +1,10 @@
-import { ConnectionException } from '@mikro-orm/core';
 import type { ArgumentsHost, ExceptionFilter } from '@nestjs/common';
 import { Catch, HttpException, Injectable } from '@nestjs/common';
 import { InjectPinoLogger, type PinoLogger } from 'nestjs-pino';
 import { ZodError } from 'zod';
 import { DomainError } from '../../domain/shared/domain-error';
 import type { ErrorCode } from '../../domain/shared/failure-code';
+import { isConnectionError } from '../../infrastructure/persistence/pg-errors';
 import { statusFor } from './error-status-map';
 
 /** Subconjunto do logger usado pelo filtro (facilita testar sem o pino). */
@@ -27,21 +27,6 @@ interface ResolvedError {
 /** Segundos sugeridos ao cliente antes de reenviar após um 503. */
 const RETRY_AFTER_SECONDS = '1';
 
-/** Códigos de erro de rede/Postgres que indicam banco indisponível (falha transitória). */
-const CONNECTION_ERROR_CODES = new Set([
-  'ECONNREFUSED',
-  'ECONNRESET',
-  'ETIMEDOUT',
-  'ENOTFOUND',
-  'EAI_AGAIN',
-  '57P01', // admin_shutdown
-  '57P03', // cannot_connect_now
-  '08000',
-  '08001',
-  '08003',
-  '08006',
-]);
-
 /**
  * Filtro global: converte qualquer erro no corpo uniforme
  * `{ error: { code, message, retryable } }`, sem nunca expor stack trace.
@@ -56,8 +41,11 @@ export class HttpErrorFilter implements ExceptionFilter {
     const e = this.resolve(exception);
 
     if (e.status >= 500) {
-      // 5xx: loga o erro completo (com stack) apenas no log, nunca na resposta
-      this.logger.error({ err: exception, code: e.code, status: e.status }, 'request failed');
+      // 5xx: loga só campos seguros do erro (sem a query nem os valores), nunca na resposta
+      this.logger.error(
+        { err: safeError(exception), code: e.code, status: e.status },
+        'request failed',
+      );
     } else {
       // 4xx: sem corpo da requisição nem stack, só o necessário para diagnóstico
       this.logger.info({ code: e.code, status: e.status }, e.message);
@@ -108,6 +96,41 @@ export class HttpErrorFilter implements ExceptionFilter {
   }
 }
 
+/** Profundidade máxima da cadeia de `cause` percorrida no log. */
+const MAX_CAUSE_DEPTH = 3;
+
+interface SafeError {
+  type: string;
+  message?: string;
+  stack?: string;
+  code?: string;
+  constraint?: string;
+  table?: string;
+  cause?: SafeError;
+}
+
+/**
+ * Reduz um erro aos campos que podem ir para o log. Erros do driver (com SQLSTATE `code`) trazem
+ * a query com os valores já interpolados na mensagem e na stack, e `detail` com a linha inteira:
+ * por isso, neles, só nome, código, constraint e tabela são mantidos.
+ */
+export function safeError(error: unknown, depth = 0): SafeError {
+  if (!(error instanceof Error)) return { type: typeof error };
+  const { code, constraint, table } = error as unknown as Record<string, unknown>;
+  const isDriverError = typeof code === 'string' || typeof constraint === 'string';
+  const safe: SafeError = { type: error.name };
+  if (typeof code === 'string') safe.code = code;
+  if (typeof constraint === 'string') safe.constraint = constraint;
+  if (typeof table === 'string') safe.table = table;
+  if (!isDriverError) {
+    safe.message = error.message;
+    safe.stack = error.stack;
+  }
+  const { cause } = error;
+  if (cause !== undefined && depth < MAX_CAUSE_DEPTH) safe.cause = safeError(cause, depth + 1);
+  return safe;
+}
+
 /** Resume os problemas de validação sem ecoar os valores recebidos. */
 function zodMessage(error: ZodError): string {
   return error.issues
@@ -124,12 +147,4 @@ function exposedClientErrorStatus(exception: unknown): number | null {
   const { status, expose } = exception as { status?: unknown; expose?: unknown };
   const isClientError = typeof status === 'number' && status >= 400 && status < 500;
   return isClientError && expose === true ? status : null;
-}
-
-function isConnectionError(exception: unknown): boolean {
-  if (exception instanceof ConnectionException) return true;
-  if (!(exception instanceof Error)) return false;
-  if (exception.name === 'KnexTimeoutError') return true;
-  const code = (exception as { code?: unknown }).code;
-  return typeof code === 'string' && CONNECTION_ERROR_CODES.has(code);
 }

@@ -5,13 +5,13 @@ export class Migration20261020000000_initial_schema extends Migration {
   override async up(): Promise<void> {
     this.addSql(`
       CREATE TABLE wallets (
-        id uuid PRIMARY KEY,
-        player_id uuid NOT NULL,
-        currency char(3) NOT NULL,
-        balance numeric(20,2) NOT NULL,
-        version int NOT NULL,
-        created_at timestamptz NOT NULL,
-        updated_at timestamptz NOT NULL,
+        id UUID PRIMARY KEY,
+        player_id UUID NOT NULL,
+        currency CHAR(3) NOT NULL,
+        balance NUMERIC(20,2) NOT NULL,
+        version INT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
         CONSTRAINT wallets_currency_format_ck CHECK (currency ~ '^[A-Z]{3}$'),
         CONSTRAINT wallets_balance_non_negative_ck CHECK (balance >= 0),
         CONSTRAINT wallets_version_positive_ck CHECK (version >= 1),
@@ -21,29 +21,29 @@ export class Migration20261020000000_initial_schema extends Migration {
 
     this.addSql(`
       CREATE TABLE wager_transactions (
-        id uuid PRIMARY KEY,
-        provider_id text NOT NULL,
-        external_transaction_id text NOT NULL,
-        idempotency_key text NOT NULL,
-        payload_hash char(64) NOT NULL,
-        wallet_id uuid NOT NULL REFERENCES wallets (id),
-        player_id uuid NOT NULL,
-        round_id text NOT NULL,
-        game_id text NOT NULL,
-        kind text NOT NULL,
-        amount numeric(20,2) NOT NULL,
-        currency char(3) NOT NULL,
-        reference_external_transaction_id text NULL,
-        reference_transaction_id uuid NULL REFERENCES wager_transactions (id),
-        status text NOT NULL,
-        failure_code text NULL,
-        reference_attempts int NOT NULL DEFAULT 0,
-        next_reference_attempt_at timestamptz NULL,
-        balance_after numeric(20,2) NULL,
-        wallet_version_after int NULL,
-        processed_at timestamptz NULL,
-        created_at timestamptz NOT NULL,
-        updated_at timestamptz NOT NULL,
+        id UUID PRIMARY KEY,
+        provider_id TEXT NOT NULL,
+        external_transaction_id TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        payload_hash CHAR(64) NOT NULL,
+        wallet_id UUID NOT NULL REFERENCES wallets (id),
+        player_id UUID NOT NULL,
+        round_id TEXT NOT NULL,
+        game_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        amount NUMERIC(20,2) NOT NULL,
+        currency CHAR(3) NOT NULL,
+        reference_external_transaction_id TEXT NULL,
+        reference_transaction_id UUID NULL REFERENCES wager_transactions (id),
+        status TEXT NOT NULL,
+        failure_code TEXT NULL,
+        reference_attempts INT NOT NULL DEFAULT 0,
+        next_reference_attempt_at TIMESTAMPTZ NULL,
+        balance_after NUMERIC(20,2) NULL,
+        wallet_version_after INT NULL,
+        processed_at TIMESTAMPTZ NULL,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
         CONSTRAINT wager_tx_provider_external_uq UNIQUE (provider_id, external_transaction_id),
         CONSTRAINT wager_tx_provider_idem_uq UNIQUE (provider_id, idempotency_key),
         CONSTRAINT wager_tx_amount_positive_ck CHECK (amount > 0),
@@ -83,16 +83,16 @@ export class Migration20261020000000_initial_schema extends Migration {
 
     this.addSql(`
       CREATE TABLE wallet_ledger_entries (
-        id uuid PRIMARY KEY,
-        wallet_id uuid NOT NULL,
-        transaction_id uuid NOT NULL REFERENCES wager_transactions (id),
-        direction text NOT NULL,
-        amount numeric(20,2) NOT NULL,
-        currency char(3) NOT NULL,
-        balance_before numeric(20,2) NOT NULL,
-        balance_after numeric(20,2) NOT NULL,
-        wallet_version int NOT NULL,
-        created_at timestamptz NOT NULL,
+        id UUID PRIMARY KEY,
+        wallet_id UUID NOT NULL,
+        transaction_id UUID NOT NULL REFERENCES wager_transactions (id),
+        direction TEXT NOT NULL,
+        amount NUMERIC(20,2) NOT NULL,
+        currency CHAR(3) NOT NULL,
+        balance_before NUMERIC(20,2) NOT NULL,
+        balance_after NUMERIC(20,2) NOT NULL,
+        wallet_version INT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL,
         CONSTRAINT ledger_wallet_currency_fk FOREIGN KEY (wallet_id, currency)
           REFERENCES wallets (id, currency),
         CONSTRAINT ledger_tx_wallet_uq UNIQUE (transaction_id, wallet_id),
@@ -111,25 +111,25 @@ export class Migration20261020000000_initial_schema extends Migration {
 
     this.addSql(`
       CREATE TABLE inbox_messages (
-        consumer_name text NOT NULL,
-        message_id text NOT NULL,
-        payload_hash char(64) NOT NULL,
-        received_at timestamptz NOT NULL,
-        processed_at timestamptz NULL,
+        consumer_name TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        payload_hash CHAR(64) NOT NULL,
+        received_at TIMESTAMPTZ NOT NULL,
+        processed_at TIMESTAMPTZ NULL,
         PRIMARY KEY (consumer_name, message_id)
       )`);
 
     this.addSql(`
       CREATE TABLE outbox_messages (
-        id uuid PRIMARY KEY,
-        aggregate_id text NOT NULL,
-        event_type text NOT NULL,
-        payload jsonb NOT NULL,
-        occurred_at timestamptz NOT NULL,
-        attempts int NOT NULL DEFAULT 0,
-        next_attempt_at timestamptz NOT NULL,
-        published_at timestamptz NULL,
-        last_error text NULL,
+        id UUID PRIMARY KEY,
+        aggregate_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        payload JSONB NOT NULL,
+        occurred_at TIMESTAMPTZ NOT NULL,
+        attempts INT NOT NULL DEFAULT 0,
+        next_attempt_at TIMESTAMPTZ NOT NULL,
+        published_at TIMESTAMPTZ NULL,
+        last_error TEXT NULL,
         CONSTRAINT outbox_attempts_ck CHECK (attempts >= 0)
       )`);
     this.addSql(`
@@ -138,7 +138,7 @@ export class Migration20261020000000_initial_schema extends Migration {
 
     // Ledger append-only.
     this.addSql(`
-      CREATE FUNCTION forbid_ledger_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
+      CREATE FUNCTION forbid_ledger_mutation() RETURNS TRIGGER LANGUAGE plpgsql AS $$
       BEGIN
         RAISE EXCEPTION 'wallet_ledger_entries is append-only (% not allowed)', TG_OP;
       END;
@@ -149,7 +149,7 @@ export class Migration20261020000000_initial_schema extends Migration {
 
     // Transações: estado terminal é imutável, colunas de identidade/valor nunca mudam, sem DELETE.
     this.addSql(`
-      CREATE FUNCTION guard_wager_transaction_update() RETURNS trigger LANGUAGE plpgsql AS $$
+      CREATE FUNCTION guard_wager_transaction_update() RETURNS TRIGGER LANGUAGE plpgsql AS $$
       BEGIN
         IF TG_OP = 'DELETE' THEN
           RAISE EXCEPTION 'wager_transactions rows cannot be deleted';

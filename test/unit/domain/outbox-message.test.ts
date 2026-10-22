@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { WalletBalanceChanged } from '../../../src/domain/events/wallet-balance-changed';
 import { OutboxMessage } from '../../../src/domain/messaging/outbox-message';
+import { InvariantViolationError } from '../../../src/domain/shared/domain-error';
 import { Money } from '../../../src/domain/shared/money';
 import { LedgerDirection } from '../../../src/domain/wallet/ledger-direction';
 import { Wallet } from '../../../src/domain/wallet/wallet';
@@ -87,5 +88,47 @@ describe('OutboxMessage', () => {
     expect(msg.publishedAt).toEqual(at);
     expect(msg.isPending()).toBe(false);
     expect(msg.isDue(new Date(now.getTime() + 10_000))).toBe(false);
+  });
+});
+
+describe('OutboxMessage.rehydrate / markPublished', () => {
+  const state = {
+    id: 'ev9',
+    aggregateId: 'w9',
+    eventType: 'WagerTransactionProcessed',
+    payload: { eventId: 'ev9' },
+    occurredAt,
+    attempts: 3,
+    nextAttemptAt: new Date('2026-10-20T12:05:00Z'),
+  };
+
+  test('rehydrate keeps the persisted state as is', () => {
+    const msg = OutboxMessage.rehydrate(state);
+    expect(msg.id).toBe('ev9');
+    expect(msg.aggregateId).toBe('w9');
+    expect(msg.eventType).toBe('WagerTransactionProcessed');
+    expect(msg.payload).toEqual({ eventId: 'ev9' });
+    expect(msg.attempts).toBe(3);
+    expect(msg.nextAttemptAt).toEqual(new Date('2026-10-20T12:05:00Z'));
+    expect(msg.isPending()).toBe(true);
+    expect(msg.isDue(new Date('2026-10-20T12:04:59Z'))).toBe(false);
+    expect(msg.isDue(new Date('2026-10-20T12:05:00Z'))).toBe(true);
+  });
+
+  test('rehydrate of a published message -> not pending', () => {
+    const publishedAt = new Date('2026-10-20T12:06:00Z');
+    const msg = OutboxMessage.rehydrate({ ...state, publishedAt });
+    expect(msg.publishedAt).toEqual(publishedAt);
+    expect(msg.isPending()).toBe(false);
+  });
+
+  test('markPublished twice -> InvariantViolationError, first publishedAt kept', () => {
+    const msg = OutboxMessage.rehydrate(state);
+    const first = new Date('2026-10-20T12:06:00Z');
+    msg.markPublished(first);
+    expect(() => msg.markPublished(new Date('2026-10-20T12:07:00Z'))).toThrow(
+      InvariantViolationError,
+    );
+    expect(msg.publishedAt).toEqual(first);
   });
 });
