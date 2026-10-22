@@ -717,21 +717,21 @@ na mensagem passa pelas mesmas validações de domínio.
 
   | Métrica | Rótulos | Pergunta que responde |
   |---|---|---|
-  | `wagering_transactions_total` | `channel` (`http`, `sqs`, `worker`), `kind`, `status`, `failure_code` (só em `REJECTED`) | Quantas transações novas chegaram a cada estado, por onde, e por que as rejeitadas foram rejeitadas? |
+  | `wagering_transactions_total` | `channel` (`http`, `sqs`, `worker`), `kind`, `status`, `failure_code` (só em `REJECTED`) | Quantas transições de estado houve, por onde e por quê (rejeições)? Conta transações novas e, no canal `worker`, a resolução ou rejeição de uma pendente: a mesma transação pode aparecer duas vezes, então a soma dos status não é o total de transações. |
   | `wagering_duplicates_total` | `type` (`idempotency_replay`, `idempotency_conflict`, `inbox_redelivery`, `inbox_conflict`) | Quantas repetições e conflitos de chave ou de `messageId` o sistema absorveu? |
   | `wagering_retries_total` | `operation` (`use_case_transient`, `sqs_visibility`, `outbox_publish`, `reference_reschedule`) | Onde o sistema está refazendo trabalho: transações em erro transitório, mensagens devolvidas à fila, publicações da outbox, referências reagendadas? |
   | `wagering_dlq_messages_total` | `failure_code` | Quantas mensagens foram para a DLQ e por qual motivo? |
-  | `wagering_lock_conflicts_total` | `code` (`55P03`, `40P01`, `40001`, `57014`, `connection`, `other`) | Há disputa de lock, deadlock ou timeout no banco? Contado onde o erro transitório é classificado, a cada ocorrência (inclusive a que esgota as tentativas). |
+  | `wagering_lock_conflicts_total` | `code` (`55P03`, `40P01`, `40001`, `57014`, `connection`, `other`) | Há disputa de lock, deadlock ou timeout no banco? O rótulo `connection` agrupa as falhas de conexão (banco fora), que seguem a mesma política de retry. Contado onde o erro transitório é classificado, a cada ocorrência (inclusive a que esgota as tentativas). |
   | `wagering_outbox_pending` | (gauge) | Quantos eventos já confirmados no banco ainda não foram publicados? |
   | `wagering_outbox_lag_seconds` | (gauge) | Há quanto tempo o evento pendente mais antigo espera? Cresce se o SQS cai ou um evento trava em retry. |
-  | `wagering_processing_duration_seconds` | histograma por `channel` e `outcome` (`processed`, `rejected`, `pending`, `replay`, `conflict`, `resolved`, `rescheduled`, `skipped`, `error`) | Quanto tempo o caso de uso leva (transação inteira, com lock e retries), por canal e resultado? |
+  | `wagering_processing_duration_seconds` | histograma por `channel` e `outcome` (`processed`, `rejected`, `pending`, `replay`, `conflict`, `resolved`, `rescheduled`, `skipped`, `error`; `error` inclui erros do cliente, como payload inválido ou wallet inexistente) | Quanto tempo o caso de uso leva (transação inteira, com lock e retries), por canal e resultado? |
 
   As métricas são **por instância**: contadores locais em memória, que não participam de nenhuma
   decisão de correção. Com várias instâncias, o Prometheus coleta cada uma e agrega (`sum by (...)`
   sobre os contadores, `max` sobre o lag). Reiniciar uma instância zera os contadores dela, o que
   `rate()` e `increase()` já tratam. Os gauges da outbox são lidos do banco a cada coleta, com uma
   única consulta curta (índice parcial dos não publicados) e prazo de 1 s; se o banco não responde
-  a tempo, valem `NaN` e a coleta continua. Todas as instâncias enxergam a mesma outbox, então o
+  a tempo, valem `NaN` e a coleta continua; uma consulta lenta é reaproveitada pelas coletas seguintes (uma por vez por instância) e o `statement_timeout` local de 1 s a cancela no servidor. Todas as instâncias enxergam a mesma outbox, então o
   valor é o mesmo em cada uma (agregar com `max`, não `sum`).
 - `GET /health/live`: processo vivo, sem consultar dependências.
 - `GET /health/ready`: `SELECT 1` no Postgres e `GetQueueUrl` nas três filas, em paralelo, cada
