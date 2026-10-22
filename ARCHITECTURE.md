@@ -692,6 +692,31 @@ Os endpoints de health (`/health/live`, `/health/ready`) e `/metrics` são marca
 abertos. Mensagens da fila são tratadas como canal interno confiável, mas a identidade do provedor
 na mensagem passa pelas mesmas validações de domínio.
 
+### Como seria implementado
+
+A autenticação ficou de fora por escolha: ela não pontua e competiria com correção financeira,
+concorrência e idempotência. O ponto de extensão existe e está testado como no-op; o caminho abaixo
+é o que seria feito, em ordem, sem mudar o domínio nem os casos de uso.
+
+| Etapa | O que muda | Onde |
+|---|---|---|
+| 1. Identidade | `JwtProviderIdentity` implementa `ProviderIdentityPort`: valida o bearer token (assinatura por JWKS com cache e atualização quando aparece um `kid` desconhecido, `iss`, `aud`, `exp`, tolerância de relógio de 30 s) e devolve o `providerId` de uma claim do client | `infrastructure/auth` (biblioteca `jose`) |
+| 2. Guard | o `AuthGuard` deixa de ser no-op: sem token ou token inválido → `401 UNAUTHORIZED`; rotas `@Public()` seguem abertas | `infrastructure/auth/auth.guard.ts` |
+| 3. Provedor do token × provedor do corpo | `providerId` do token diferente do corpo, ou de um `GET` de outro provedor → `403` com código próprio (hoje `401` e `403` colapsam no mesmo código, ver seção 19); `GET` de transação de outro provedor responde `404`, sem revelar que existe | guard e controllers |
+| 4. Escopos | `wagers:submit`, `wagers:read` e `wallets:manage` (criar wallet e reconciliar, operações de back-office) no token; rota sem o escopo → `403` | decorator de escopo, negado por padrão |
+| 5. Configuração | `AUTH_ENABLED` (desligado por padrão, para a demonstração e os testes), `OIDC_ISSUER`, `OIDC_AUDIENCE`, `OIDC_JWKS_URI`, validadas no boot | `infrastructure/config` |
+| 6. Infraestrutura | Keycloak num profile `auth` do Compose, com realm importado (um client por provedor, `client_credentials`) e heap limitado; não sobe junto com as três instâncias e o teste de carga numa máquina de 8 GB | `docker-compose.yml` |
+| 7. Testes | unitários do guard com um par de chaves gerado no teste e JWKS local (token válido, expirado, `aud` errado, assinatura errada, provedor trocado, health aberto); integração contra o Keycloak real, no profile `auth` | `test/unit`, `test/integration` |
+
+**Trade-offs.**
+
+| Ponto | Decisão | Motivo |
+|---|---|---|
+| Validação do token | local, por JWKS em cache; sem chamar o IdP a cada requisição | não coloca o IdP no caminho crítico nem soma latência |
+| Revogação | tokens de vida curta (minutos); sem lista de revogação | revogar de verdade exigiria introspecção a cada chamada; para APIs servidor a servidor o TTL curto basta |
+| Fila | canal interno confiável: quem escreve na fila é autenticado pelo IAM da AWS, e o `providerId` da mensagem passa pelas mesmas validações de domínio | não há bearer token em mensagem SQS |
+| Mensagem cujo `providerId` não é o de quem a produziu | não é verificada: é o preço de tratar a fila como canal confiável | restringir exigiria um atributo assinado na mensagem; quem controla a fila já controla o sistema |
+
 ## 15. Observabilidade e health checks
 
 - Logs JSON (pino) com uma linha por requisição. O header `x-correlation-id` é aceito (se for um
@@ -930,6 +955,22 @@ aparece). Formato: decisão, alternativas consideradas e motivo.
 | Testes de falha do consumer com filas e instância próprias e provider trocado | usar a instância compartilhada da suíte | a instância compartilhada consumiria as mensagens e um long poll abortado de outra instância poderia recebê-las |
 | Sem mocks de banco ou fila nos testes de integração | repositórios e cliente SQS falsos | o enunciado exige Postgres e LocalStack reais; só se troca um provider para provocar uma falha específica |
 
+### O que ficou de fora de propósito
+
+Prioridade do projeto: correção financeira, concorrência, idempotência e mensageria primeiro, e a
+opção mais simples quando houver dúvida. Estes itens foram avaliados e deixados de fora; cada um
+diz o que custaria e como entraria.
+
+| Item | Por que ficou de fora | Como entraria |
+|---|---|---|
+| Autenticação com IdP | o enunciado a trata como opcional e fora da pontuação; competiria com o resto | seção 14, "Como seria implementado" |
+| Ledger de partidas dobradas | diferencial opcional; o ledger de lançamento simples já é auditável e reconciliável, e um segundo lado de cada lançamento dobraria as escritas na transação mais disputada | contas de contrapartida por moeda e uma restrição diferida que exija soma zero por transação |
+| Gateway na borda (limite de taxa, timeouts) | infraestrutura de implantação, fora do que o serviço garante; `lock_timeout` e `statement_timeout` já limitam quanto tempo uma requisição segura o banco | proxy reverso na frente das instâncias, com limite por IP e `/metrics` só na rede interna |
+| Tracing distribuído e painéis | o serviço expõe logs com ids, métricas Prometheus e health; tracing e painéis pesam numa máquina de 8 GB e não mudam a correção | coletor OTLP e um dashboard sobre as métricas já expostas (seção 19) |
+| Auditoria de submissões inválidas | decisão da seção 4: o que falha antes de existir uma transação válida devolve o erro e fica em log e métrica (no SQS, vai para a DLQ com o código); só a rejeição de negócio é gravada | tabela própria de recusas, com retenção, fora da tabela de transações |
+| Lote por wallet no consumer | otimização de vazão; o gargalo medido no teste de carga é o publisher da outbox, não o consumer | seção 19 |
+| Autorização por escopo e isolamento entre provedores | depende da autenticação | seção 14, etapas 3 e 4 |
+
 ## 18. Limitações conhecidas
 
 - `TRUNCATE` não dispara os triggers de linha que tornam o ledger append-only. Ele é usado apenas
@@ -1000,7 +1041,7 @@ aparece). Formato: decisão, alternativas consideradas e motivo.
 - **Ack em lote** (`DeleteMessageBatch`) no consumer, para reduzir chamadas ao SQS sob carga.
 - **Usuário de banco só com DML** para a aplicação (`SELECT`, `INSERT`, `UPDATE`), sem `TRUNCATE`
   nem DDL; as migrations rodam com outro usuário.
-- **Autenticação real com Keycloak** (desenho na seção 14): client credentials por provedor,
+- **Autenticação real com Keycloak** (etapas e trade-offs na seção 14, "Como seria implementado"): client credentials por provedor,
   validação do token por JWKS no `AuthGuard` e `ProviderIdentityPort` comparando o `providerId` das
   claims com o do corpo. Entraria como um futuro profile `auth` do Compose, com heap limitado.
 - **Publicar a outbox em lote** (`SendMessageBatch`) e perfilar o publisher: é o gargalo

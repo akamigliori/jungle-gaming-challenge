@@ -8,6 +8,40 @@ Stack: Bun 1.x, TypeScript (strict), NestJS, MikroORM, PostgreSQL 17, SQS (Local
 Decisões completas, taxonomia de erros e limitações estão no [`ARCHITECTURE.md`](ARCHITECTURE.md);
 este README é o mapa e o guia de uso.
 
+## Destaques
+
+- **Correção provada, não prometida.** 295 testes unitários, 184 de integração, 6 de concorrência e
+  1 com **três processos reais** (`SIGKILL`, `SIGTERM` e reinício), todos com PostgreSQL e SQS
+  reais, sem mocks de banco ou fila.
+- **O banco é a última linha de defesa.** Saldo não negativo, ledger append-only (trigger),
+  cadeia de lançamentos sem buracos, uma reversão por referência e idempotência são `CHECK`,
+  `UNIQUE` e triggers, não só código.
+- **Concorrência por wallet.** Lock `FOR UPDATE` por wallet, com `version` como segunda defesa;
+  wallets diferentes nunca se bloqueiam.
+- **Mensageria sem perda e sem duplicata.** Inbox, saldo, ledger e outbox na mesma transação; `ack`
+  só depois do `COMMIT`; retry com backoff, DLQ explícita e ordem preservada por wallet.
+- **Reconciliação.** `POST /wallets/:walletId/reconciliation` confere o saldo gravado contra o
+  ledger, e o teste de carga termina reconciliando todas as wallets criadas.
+- **Teste de carga honesto.** `bun run test:load` contra as três instâncias: cerca de 290 req/s
+  em uma máquina de desenvolvimento, sem erro 5xx, 200 de 200 wallets consistentes, com o gargalo
+  (o publisher da outbox) nomeado e medido ([ARCHITECTURE.md, seção 16](ARCHITECTURE.md)).
+- **Simples de propósito.** Sem gateway, painéis ou tracing distribuído: o que ficou de fora e por
+  quê está em [ARCHITECTURE.md, seção 17](ARCHITECTURE.md), junto com o desenho da autenticação
+  ([seção 14](ARCHITECTURE.md)).
+
+## Início rápido
+
+Com Docker e [Bun](https://bun.sh) instalados:
+
+```bash
+bun install
+docker compose --profile app up -d --build --wait   # Postgres, LocalStack, migrations e 3 instâncias (localhost:3001 a 3003)
+DEMO_BASE_URL=http://localhost:3001 bun run demo    # roteiro narrado: aposta, replay, conflito, pendência, SQS, reconciliação
+docker compose rm -sf migrate app-1 app-2 app-3     # desliga as instâncias; Postgres e LocalStack seguem no ar
+```
+
+Se a porta 5432 do host já estiver em uso, veja o [Setup](#setup).
+
 **Neste documento:** [Visão geral](#visão-geral) · [Arquitetura](#arquitetura) ·
 [Como uma aposta é processada](#como-uma-aposta-é-processada) ·
 [Garantias e como são impostas](#garantias-e-como-são-impostas) · [Mensageria](#mensageria) ·
