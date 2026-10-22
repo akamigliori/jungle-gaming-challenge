@@ -11,6 +11,7 @@
     "check:money": "bun scripts/check-money.ts",
     "test": "bun test test/unit",
     "test:integration": "bun test test/integration --timeout 30000",
+    "test:concurrency": "bun test test/concurrency --timeout 30000",
     "migration:up": "bun scripts/migrate.ts up",
     "migration:down": "bun scripts/migrate.ts down"
   },
