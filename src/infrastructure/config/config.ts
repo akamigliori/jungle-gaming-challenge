@@ -16,6 +16,12 @@ export interface AppConfig {
       events: 'wagering-events.fifo';
     };
   };
+  outboxPublisher: {
+    enabled: boolean;
+    pollIntervalMs: number;
+    batchSize: number;
+    leaseMs: number;
+  };
   logLevel: string;
 }
 
@@ -31,6 +37,11 @@ const envSchema = z.object({
   AWS_SECRET_ACCESS_KEY: z.string().min(1).default('test'),
   PORT: z.coerce.number().int().positive().default(3000),
   LOG_LEVEL: z.string().min(1).default('info'),
+  // `stringbool` aceita "true"/"false" (e "1"/"0"); `coerce.boolean` trataria "false" como verdadeiro
+  OUTBOX_PUBLISHER_ENABLED: z.stringbool().default(true),
+  OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(250),
+  OUTBOX_BATCH_SIZE: z.coerce.number().int().positive().max(1000).default(50),
+  OUTBOX_LEASE_MS: z.coerce.number().int().positive().default(30_000),
 });
 
 /** Lê e valida as variáveis de ambiente; os defaults servem ao ambiente local do docker-compose. */
@@ -55,6 +66,12 @@ export function loadConfig(env: Env = process.env): AppConfig {
         transactionsDlq: 'wager-transactions-dlq.fifo',
         events: 'wagering-events.fifo',
       },
+    },
+    outboxPublisher: {
+      enabled: e.OUTBOX_PUBLISHER_ENABLED,
+      pollIntervalMs: e.OUTBOX_POLL_INTERVAL_MS,
+      batchSize: e.OUTBOX_BATCH_SIZE,
+      leaseMs: e.OUTBOX_LEASE_MS,
     },
     logLevel: e.LOG_LEVEL,
   };

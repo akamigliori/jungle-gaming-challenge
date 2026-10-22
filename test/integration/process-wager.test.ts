@@ -438,7 +438,7 @@ describe('ProcessWagerTransactionUseCase — validation and failures', () => {
   test('when the outbox insert fails, no tx/ledger/outbox row remains and the balance is intact', async () => {
     const walletId = await createWallet();
     const before = await counts();
-    const failingOutbox: OutboxRepository = {
+    const failingOutbox: Pick<OutboxRepository, 'enqueue'> = {
       enqueue: () => Promise.reject(new Error('outbox unavailable')),
     };
     const broken = await createTestApp({}, (builder) =>
