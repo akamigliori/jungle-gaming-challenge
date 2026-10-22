@@ -21,3 +21,26 @@ describe('loadConfig outbox publisher', () => {
     expect(() => loadConfig({ OUTBOX_LEASE_MS: '-1' })).toThrow();
   });
 });
+
+describe('loadConfig SQS queues', () => {
+  test('defaults keep the current queue names', () => {
+    expect(loadConfig({}).sqs.queues).toEqual({
+      transactions: 'wager-transactions.fifo',
+      transactionsDlq: 'wager-transactions-dlq.fifo',
+      events: 'wagering-events.fifo',
+    });
+  });
+
+  test('queue names come from the environment', () => {
+    const queues = loadConfig({
+      SQS_TRANSACTIONS_QUEUE: 'x.fifo',
+      SQS_TRANSACTIONS_DLQ: 'x-dlq.fifo',
+      SQS_EVENTS_QUEUE: 'x-events.fifo',
+    }).sqs.queues;
+    expect(queues).toEqual({
+      transactions: 'x.fifo',
+      transactionsDlq: 'x-dlq.fifo',
+      events: 'x-events.fifo',
+    });
+  });
+});
