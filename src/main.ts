@@ -1,6 +1,7 @@
 import 'reflect-metadata';
 import { createApp } from './app';
 import { loadConfig } from './infrastructure/config/config';
+import { safeError } from './infrastructure/logging/safe-error';
 
 /** Folga sobre o prazo do consumer para o resto do shutdown (HTTP, pool, cliente SQS). */
 const FORCED_EXIT_MARGIN_MS = 5000;
@@ -41,4 +42,8 @@ async function bootstrap(): Promise<void> {
   await app.listen(config.port);
 }
 
-void bootstrap();
+/** Falha de inicialização: uma linha JSON no stderr (sem valores sensíveis) e saída com código 1. */
+bootstrap().catch((error: unknown) => {
+  console.error(JSON.stringify({ level: 'fatal', msg: 'startup failed', err: safeError(error) }));
+  process.exit(EXIT_FAILURE);
+});

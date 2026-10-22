@@ -25,6 +25,13 @@ interface ResolvedError {
   retryable: boolean;
 }
 
+const GENERIC_5XX_MESSAGE = 'Internal server error';
+const UNAVAILABLE_MESSAGE = 'Service temporarily unavailable';
+
+function genericMessage(status: number): string {
+  return status === 503 ? UNAVAILABLE_MESSAGE : GENERIC_5XX_MESSAGE;
+}
+
 /** Segundos sugeridos ao cliente antes de reenviar após um 503. */
 const RETRY_AFTER_SECONDS = '1';
 
@@ -60,7 +67,10 @@ export class HttpErrorFilter implements ExceptionFilter {
 
   private resolve(exception: unknown): ResolvedError {
     if (exception instanceof DomainError) {
-      return { code: exception.code, message: exception.message, ...statusFor(exception.code) };
+      const mapped = statusFor(exception.code);
+      // 5xx nunca ecoa a mensagem interna: o detalhe fica só no log
+      const message = mapped.status >= 500 ? genericMessage(mapped.status) : exception.message;
+      return { code: exception.code, message, ...mapped };
     }
     if (exception instanceof ZodError) {
       return this.fromCode('INVALID_PAYLOAD', zodMessage(exception));
@@ -85,7 +95,7 @@ export class HttpErrorFilter implements ExceptionFilter {
     const status = exception.getStatus();
     if (status === 404) return this.fromCode('NOT_FOUND', exception.message);
     if (status === 401 || status === 403) return this.fromCode('UNAUTHORIZED', exception.message);
-    if (status === 503) return this.fromCode('SERVICE_UNAVAILABLE', exception.message);
+    if (status === 503) return this.fromCode('SERVICE_UNAVAILABLE', UNAVAILABLE_MESSAGE);
     if (status >= 500) return this.fromCode('INTERNAL_ERROR', 'Internal server error');
     // demais 4xx do framework (JSON malformado, corpo grande demais, etc.): payload inválido,
     // preservando o status original

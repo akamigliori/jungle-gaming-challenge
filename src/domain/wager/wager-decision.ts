@@ -1,7 +1,11 @@
 import type { FailureCode } from '../shared/failure-code';
 import { LedgerDirection } from '../wallet/ledger-direction';
 import type { Wallet } from '../wallet/wallet';
-import { InsufficientFundsError, ReversalInsufficientFundsError } from '../wallet/wallet-errors';
+import {
+  BalanceLimitExceededError,
+  InsufficientFundsError,
+  ReversalInsufficientFundsError,
+} from '../wallet/wallet-errors';
 import type { WalletLedgerEntry } from '../wallet/wallet-ledger-entry';
 import { type ReferenceRetryPolicy, referenceRetryDelayMs } from './reference-retry';
 import { InvalidTransactionStateError } from './wager-errors';
@@ -165,6 +169,7 @@ function applyMovement(p: DecideWagerParams, referenceId: string | undefined): W
       return reject(p, 'REVERSAL_INSUFFICIENT_FUNDS');
     }
     if (error instanceof InsufficientFundsError) return reject(p, 'INSUFFICIENT_FUNDS');
+    if (error instanceof BalanceLimitExceededError) return reject(p, 'BALANCE_LIMIT_EXCEEDED');
     throw error;
   }
 }

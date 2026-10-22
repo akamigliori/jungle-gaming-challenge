@@ -54,6 +54,7 @@ src/
 | `PLAYER_MISMATCH` | player não é dono da wallet | corrigir |
 | `INSUFFICIENT_FUNDS` | aposta sem saldo | desistir |
 | `REVERSAL_INSUFFICIENT_FUNDS` | reversão levaria o saldo a negativo | escalar/desistir |
+| `BALANCE_LIMIT_EXCEEDED` | crédito levaria o saldo além do máximo de `NUMERIC(20,2)` | escalar/desistir |
 | `REFERENCE_REQUIRED` | `REFUND`/`ROLLBACK` sem referência | corrigir |
 | `REFERENCE_NOT_FOUND` | referência não chegou dentro do limite de espera | desistir/investigar |
 | `REFERENCE_MISMATCH` | referência de outro player/wallet/rodada/moeda | corrigir |
@@ -82,7 +83,7 @@ Códigos usados apenas na API HTTP (não são `failureCode` de transação): `WA
 - **Gravados como `REJECTED`** — auditáveis, devolvidos em replay com `idempotentReplay: true` e
   publicados como `WagerTransactionRejected`: todos os demais códigos de negócio
   (`CURRENCY_MISMATCH`, `PLAYER_MISMATCH`, `INSUFFICIENT_FUNDS`, `REVERSAL_INSUFFICIENT_FUNDS`,
-  `REFERENCE_*`, `INVALID_REFERENCE_KIND`, `ALREADY_REVERSED`, `AMOUNT_MISMATCH`).
+  `BALANCE_LIMIT_EXCEEDED`, `REFERENCE_*`, `INVALID_REFERENCE_KIND`, `ALREADY_REVERSED`, `AMOUNT_MISMATCH`).
 
 ## 5. Mapeamento HTTP
 
@@ -106,10 +107,14 @@ Corpo de erro uniforme:
 ```
 
 `retryable` é `true` só para `SERVICE_UNAVAILABLE`. O filtro global (`HttpErrorFilter`) nunca
-devolve stack trace: erros `5xx` são logados com o erro completo, `4xx` são logados sem o corpo
+devolve stack trace: erros `5xx` são logados apenas com campos seguros (`safeError`), `4xx` são logados sem o corpo
 da requisição. JSON malformado e erros de validação viram `400 INVALID_PAYLOAD`; demais erros do
 parser do corpo mantêm o status original com código `INVALID_PAYLOAD` (ex.: corpo grande demais →
-`413`); falha de conexão com o banco vira `503`.
+`413`); falha de conexão com o banco vira `503`. Nas respostas `5xx` a mensagem é sempre genérica
+(`Internal server error` ou `Service temporarily unavailable`), mesmo quando o erro é um erro de
+domínio: o detalhe fica só no log. Uma soma de `Money` fora da faixa do `NUMERIC(20,2)` nunca
+chega ao banco: `Money.add` lança erro de domínio e, num crédito, a transação é gravada como
+`REJECTED` com `BALANCE_LIMIT_EXCEEDED` (`422`).
 
 ## 6. Interpretações de regra adotadas
 
@@ -776,12 +781,82 @@ na mensagem passa pelas mesmas validações de domínio.
   verificação com timeout de 2 s; `503` indicando qual dependência está `down`. O cliente SQS não
   faz retry interno e tem timeout de conexão e de requisição, para não travar a verificação.
 
-## 16. Limitações conhecidas
+## 16. Decisões de projeto
+
+As decisões abaixo complementam as das seções anteriores (cada uma explica a sua no ponto onde
+aparece). Formato: decisão, alternativas consideradas e motivo.
+
+### Stack e código
+
+| Decisão | Alternativas | Motivo |
+|---|---|---|
+| MikroORM 6 sem decorators: mapeamento por `EntitySchema` em `infrastructure/persistence` | entidades decoradas; TypeORM; Prisma | o domínio fica sem framework e sem metadados de ORM; evita problemas de reflection no Bun |
+| IDs UUIDv7 atrás da porta `IdGenerator` (`Bun.randomUUIDv7()`) e tempo atrás da porta `Clock` | UUIDv4 direto; `Date.now()` espalhado | testes determinísticos (relógio falso avança além de um lease sem esperar); UUIDv7 é ordenável no tempo |
+| Validação de entrada com zod em `interfaces/` | `class-validator` com `ValidationPipe` | o mesmo schema serve ao controller HTTP e ao consumer SQS, que não passa pelo `ValidationPipe` |
+| Regras do valor monetário (escala, sinal, moeda, faixa) no `Money`, não no schema do corpo | validar `amount` no zod | uma só implementação para HTTP, SQS e testes; o erro sai como `INVALID_MONEY` |
+| Casos de uso montados por `useFactory` nos módulos Nest, sem decorators na aplicação | `@Injectable()` e `@Inject(TOKEN)` nos casos de uso | a aplicação não importa o Nest; a composição fica no módulo |
+| Aplicação recebe `isTransient` e `isUniqueViolation` como funções nas dependências | porta `TransientErrorDetector` com classe; importar `pg-errors` na aplicação | a aplicação não conhece o Postgres e não ganha uma interface só para duas funções |
+| Repositórios e entidades de persistência em um módulo compartilhado | cada módulo registrar os seus | HTTP, outbox, consumer e workers usam os mesmos repositórios; um ponto de registro evita providers duplicados e dependência circular |
+| Logs JSON com `nestjs-pino`, sem payload nem valores financeiros | logger padrão do Nest | logs estruturados sem vazamento de dados financeiros |
+| Lint e formatação com Biome | ESLint e Prettier | uma ferramenta só, rápida e sem configuração pesada |
+| `@nestjs/testing` (dev) para trocar providers no app de teste | hooks de teste no `AppModule`; trigger temporário no banco | mecanismo oficial do Nest, sem poluir o código de produção |
+| `WALLET_ALREADY_EXISTS` só em `ErrorCode`, fora de `FAILURE_CODES` | incluí-lo em `FAILURE_CODES` | `FailureCode` é o que se grava em transações rejeitadas; criar wallet não gera transação rejeitada |
+| Flags booleanas de ambiente com `z.stringbool()` | `z.coerce.boolean()` | `coerce.boolean` transformaria a string `"false"` em `true` |
+| Erros do body-parser (`http-errors` com `expose: true`) viram `INVALID_PAYLOAD` preservando o status | deixar cair em `500` | corpo grande demais devolve `413` e o provedor sabe que deve corrigir a requisição |
+| Erros `5xx`, inclusive de `DomainError`, saem com mensagem genérica; o detalhe fica só no log | ecoar a mensagem do erro | evita vazar detalhe interno ao cliente |
+| Falha de inicialização escrita como uma linha JSON (`level: fatal`) e saída com código 1 | deixar a promessa rejeitada sem tratamento | o orquestrador enxerga a falha e o log não perde o motivo |
+| Pool de conexões do MikroORM no padrão (2 a 10 por instância), sem variável nova | `DB_POOL_MAX` configurável | 200 requisições simultâneas passam sem erro; com N instâncias, N × 10 cabe em `max_connections = 100`; vira variável só se o teste de carga mostrar o pool como gargalo |
+
+### Schema
+
+| Decisão | Alternativas | Motivo |
+|---|---|---|
+| `CHECK` `wager_tx_reversal_resolved_ck`: `REFUND`/`ROLLBACK` `PROCESSED` exige `reference_transaction_id` | confiar só no processador; `UNIQUE NULLS NOT DISTINCT` | o índice parcial `wager_tx_single_reversal_uq` não enxerga `NULL`, então uma reversão processada sem referência escaparia de "uma reversão por referência"; `NULLS NOT DISTINCT` faria todas as reversões sem referência colidirem entre si |
+| `CHECK` baratos: snapshot de `PROCESSED`, referência diferente da própria linha, versões ≥ 1, contadores ≥ 0 | validar só no domínio | custo zero em runtime e invariantes no schema, como o enunciado pede |
+| Colunas de resultado da transação (`status`, `failure_code`, `balance_after`, `wallet_version_after`, `processed_at`, `reference_*`, `updated_at`) mutáveis; identidade, valores, `payload_hash` e `created_at` imutáveis por trigger | tabela de transação toda imutável | a transação nasce pendente e recebe o resultado depois; o que identifica e o que foi pedido nunca muda |
+| Sem FK composta `(transaction_id, wallet_id)` do ledger para `wager_transactions` | adicioná-la | exigiria um `UNIQUE` extra em `wager_transactions`; o caso de uso grava os dois com o mesmo `walletId` e a reconciliação detectaria a divergência |
+| Migrations por script próprio (`scripts/migrate.ts`, Migrator do MikroORM) | CLI do MikroORM | funciona com Bun sem ts-node; `down` reverte a última migration |
+| Migrations ficam imutáveis depois de aplicadas; mudança de schema é migration nova e reversível | editar a inicial | bancos já migrados não divergem do código |
+
+### Infraestrutura local
+
+| Decisão | Alternativas | Motivo |
+|---|---|---|
+| `postgres:17-alpine` e `localstack/localstack:4.4.0` (só SQS), versões fixas, com `mem_limit` | imagens `latest` (as recentes do LocalStack exigem token); MiniStack | reprodutibilidade e gratuidade numa máquina com pouca memória |
+| Postgres publicado na porta 5433 do host | 5432 | não conflitar com um Postgres local |
+| Filas criadas por script de init do LocalStack, FIFO com `ContentBasedDeduplication=false`; a principal com redrive para a DLQ | criar filas no código da aplicação | infraestrutura declarada fora da aplicação e deduplicação sempre explícita |
+| Healthcheck do LocalStack consulta `/_localstack/init/ready` e exige `completed: true` | `"sqs": "running"` em `/_localstack/health` | o SQS fica "running" antes de o script criar as filas; `up --wait` liberava testes e app com filas inexistentes |
+| Eventos da outbox numa terceira fila, `wagering-events.fifo` (grupo = `aggregateId`, deduplicação = `eventId`) | publicar na fila de entrada | o enunciado não define o destino; misturar eventos com comandos confundiria os consumidores |
+| Nomes das filas configuráveis por variável de ambiente | nomes fixos | cada suíte de teste usa filas próprias, sem interferir nas outras nem no ambiente local |
+| Banco de testes separado (`wagering_test`) no mesmo container | um container por ambiente | isolamento sem custo extra de memória; só é criado na primeira subida do volume |
+| Keycloak num futuro profile `auth` e as instâncias da aplicação num profile `app` | tudo sempre ativo | economizar memória; os testes reutilizam Postgres e LocalStack já no ar |
+| Testes de integração usam `TEST_LOG_LEVEL` (padrão `silent`) | herdar o `LOG_LEVEL` do `.env` | quem copia `.env.example` não vê os testes cheios de log |
+
+### Testes
+
+| Decisão | Alternativas | Motivo |
+|---|---|---|
+| Corridas em `test/concurrency` com script e passo de CI próprios; paralelismo real com `Promise.all` de `fetch` | incluir em `test:integration`; chamar o caso de uso direto | permite rodar só as corridas; passa por toda a pilha (HTTP, validação, pool, lock) |
+| Invariante do ledger (saldo = soma, versões contínuas, cadeia `balance_before`/`balance_after`) verificada depois de cada teste que grava pela aplicação | só no fim de cada suíte | só a cadeia entre linhas detecta lançamento perdido ou fora de ordem; a suíte de schema fica de fora porque grava linhas soltas de propósito |
+| Teste de que o lock é por wallet: outra conexão segura `FOR UPDATE` na wallet A e uma aposta na B volta `201` em menos de 1 s | inferir pelo tempo total | prova direta e determinística de que não existe lock global |
+| Teste multi-instância com três processos reais (`Bun.spawn`), filas próprias, `SIGKILL`, `SIGTERM` e reinício; espera por condições no banco e na fila | containers; `sleep` | determinismo e custo de memória menor que três containers |
+| Testes de falha do consumer com filas e instância próprias e provider trocado | usar a instância compartilhada da suíte | a instância compartilhada consumiria as mensagens e um long poll abortado de outra instância poderia recebê-las |
+| Sem mocks de banco ou fila nos testes de integração | repositórios e cliente SQS falsos | o enunciado exige Postgres e LocalStack reais; só se troca um provider para provocar uma falha específica |
+
+## 17. Limitações conhecidas
 
 - `TRUNCATE` não dispara os triggers de linha que tornam o ledger append-only. Ele é usado apenas
   nos testes para limpar o banco; em produção o usuário da aplicação não deve ter permissão de
   `TRUNCATE`.
-- Autenticação ainda não implementada (ver seção 14).
+- Autenticação ainda não implementada (ver seção 14): qualquer cliente que alcance a API pode
+  submeter transações em nome de qualquer provedor.
+- Não há teste de carga: os testes de concorrência provam a correção sob disputa (até 200
+  requisições simultâneas e três instâncias), mas não medem vazão nem latência sob volume.
+- A chave de idempotência e o `externalTransactionId` são independentes: reenviar a mesma operação
+  de negócio com uma chave nova e o mesmo `externalTransactionId` é `409 IDEMPOTENCY_CONFLICT`, e o
+  provedor corrige usando um `externalTransactionId` novo.
+- O ledger não tem FK composta `(transaction_id, wallet_id)`: a coerência entre a wallet do
+  lançamento e a da transação depende do caso de uso e é conferida pela reconciliação (seção 15).
 - Uma pendência cuja reavaliação falha sempre com um erro não transitório (um bug) é tentada de
   novo a cada lease (`PENDING_REFERENCE_LEASE_MS`, 30 s por padrão) e logada a cada vez; `reference_attempts` não cresce, então ela não
   chega à rejeição sozinha.
@@ -793,8 +868,13 @@ na mensagem passa pelas mesmas validações de domínio.
 - O lease usa o relógio de cada instância (`Clock`), não o do banco: relógios das instâncias
   precisam estar sincronizados (NTP) com folga bem menor que o lease de 30 s. Um desvio maior só
   causa publicação duplicada (tratada pela deduplicação), nunca perda.
-- Um crédito que levaria o saldo além de `NUMERIC(20,2)` não é validado no domínio: aparece como
-  erro do banco (`500`) e nada é gravado.
+- Um crédito que levaria o saldo além de `NUMERIC(20,2)` (18 dígitos inteiros) é uma rejeição de
+  negócio: a transação é gravada como `REJECTED` com `BALANCE_LIMIT_EXCEEDED` (`422`), o evento é
+  publicado, o SQS recebe ack e o worker de referências pendentes a encerra como `REJECTED`. O
+  limite (quase 10^18) não é alcançável na prática. Como `REFUND` e `ROLLBACK` têm o mesmo valor
+  da `BET` original, uma reversão pendente só estoura se um crédito grande entrar entre a `BET` e
+  a resolução; esse caminho é coberto por teste unitário, não por integração, por depender dessa
+  corrida.
 - As linhas publicadas da outbox nunca são removidas; falta um job de retenção.
 - Um lote reservado é publicado em sequência por wallet; se o SQS ficar lento (no pior caso cerca
   de 2,5 s por envio: 1 s para abrir a conexão mais 1,5 s esperando a resposta) e uma wallet tiver
@@ -822,7 +902,7 @@ na mensagem passa pelas mesmas validações de domínio.
   longo (um índice numa tabela grande, por exemplo) seria cancelada; ela precisa de
   `SET LOCAL statement_timeout = 0` no início, ou o script de migração precisa usar outro valor.
 
-## 17. Próximos passos
+## 18. Próximos passos
 
 - **Alertas** sobre as métricas já expostas (outbox lag crescendo, `wagering_dlq_messages_total`
   subindo, conflitos de lock) e um dashboard: hoje só há o endpoint de coleta.
@@ -831,6 +911,14 @@ na mensagem passa pelas mesmas validações de domínio.
 - **Ack em lote** (`DeleteMessageBatch`) no consumer, para reduzir chamadas ao SQS sob carga.
 - **Usuário de banco só com DML** para a aplicação (`SELECT`, `INSERT`, `UPDATE`), sem `TRUNCATE`
   nem DDL; as migrations rodam com outro usuário.
+- **Autenticação real com Keycloak** (desenho na seção 14): client credentials por provedor,
+  validação do token por JWKS no `AuthGuard` e `ProviderIdentityPort` comparando o `providerId` das
+  claims com o do corpo. Entraria como um futuro profile `auth` do Compose, com heap limitado.
+- **Teste de carga** (por exemplo k6 contra as três instâncias) para medir vazão, latência e o
+  tamanho certo do pool de conexões (hoje 10 por instância).
+- **Retenção da outbox**: job que apaga as linhas já publicadas depois de um prazo.
+- **FK composta no ledger** `(transaction_id, wallet_id)` para `wager_transactions`, o que exige
+  um `UNIQUE (id, wallet_id)` extra nessa tabela.
 - **Revisitar `403` vs `401`** quando a autenticação real estiver ativa: hoje o filtro de erros
   traduz ambos para o código `UNAUTHORIZED`. O desejado é token inválido ou ausente → `401`, e
   token válido de um provedor diferente do `providerId` do corpo → `403`, com código próprio.

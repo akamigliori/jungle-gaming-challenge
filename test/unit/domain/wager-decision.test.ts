@@ -193,6 +193,43 @@ describe('decideWager WIN', () => {
   });
 });
 
+describe('decideWager credit overflow', () => {
+  const nearMax = () =>
+    Wallet.rehydrate({
+      id: WALLET,
+      playerId: PLAYER,
+      currency: 'BRL',
+      balance: money('999999999999999999.99'),
+      version: 1,
+      createdAt: at,
+      updatedAt: at,
+    });
+
+  test('WIN that would exceed the balance limit -> REJECTED BALANCE_LIMIT_EXCEEDED', () => {
+    const tx = makeTx(K.Win, '1.00', { ref: 'ext-ref' });
+    const { wallet, decision } = run(tx, processedRef(K.Bet, '1.00'), nearMax());
+    expect(decision).toEqual({ outcome: 'REJECTED', code: 'BALANCE_LIMIT_EXCEEDED' });
+    expect(tx.status).toBe(S.Rejected);
+    expect(wallet.balance.toJSON().amount).toBe('999999999999999999.99');
+    expect(wallet.version).toBe(1);
+  });
+
+  test('pending REFUND that would exceed the limit is terminated as REJECTED', () => {
+    const tx = makeTx(K.Refund, '50.00', { ref: 'ext-ref' });
+    tx.markPendingReference({ nextAttemptAt: at });
+    const decision = reevaluatePendingWager({
+      tx,
+      wallet: nearMax(),
+      reference: processedRef(K.Bet, '50.00'),
+      at,
+      entryId: 'entry-1',
+      retry: DEFAULT_REFERENCE_RETRY,
+    });
+    expect(decision).toEqual({ outcome: 'REJECTED', code: 'BALANCE_LIMIT_EXCEEDED' });
+    expect(tx.status).toBe(S.Rejected);
+  });
+});
+
 describe('decideWager LOSS', () => {
   test('processes with no ledger entry and leaves the wallet intact', () => {
     const tx = makeTx(K.Loss, '10.00');

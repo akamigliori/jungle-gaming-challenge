@@ -8,6 +8,7 @@ const CURRENCY_PATTERN = /^[A-Z]{3}$/;
 /** Cabe em NUMERIC(20,2): 18 dígitos inteiros + 2 casas decimais. */
 const MAX_INTEGER_DIGITS = 18;
 const SCALE = 2;
+const MAX_EXCLUSIVE = new MoneyDecimal(10).pow(MAX_INTEGER_DIGITS);
 
 export interface MoneyProps {
   amount: string;
@@ -43,7 +44,12 @@ export class Money {
 
   add(other: Money): Money {
     this.assertSameCurrency(other);
-    return new Money(this.value.plus(other.value), this.currency);
+    const sum = this.value.plus(other.value);
+    // estouro de NUMERIC(20,2) vira erro de domínio, nunca erro de banco
+    if (sum.abs().greaterThanOrEqualTo(MAX_EXCLUSIVE)) {
+      throw new InvalidMoneyError('resulting amount exceeds NUMERIC(20,2) range');
+    }
+    return new Money(sum, this.currency);
   }
 
   subtract(other: Money): Money {

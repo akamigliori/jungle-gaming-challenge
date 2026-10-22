@@ -7,6 +7,7 @@ import { Money } from '../../../src/domain/shared/money';
 import { LedgerDirection } from '../../../src/domain/wallet/ledger-direction';
 import { Wallet } from '../../../src/domain/wallet/wallet';
 import {
+  BalanceLimitExceededError,
   InsufficientFundsError,
   ReversalInsufficientFundsError,
 } from '../../../src/domain/wallet/wallet-errors';
@@ -84,6 +85,13 @@ describe('Wallet', () => {
     const { wallet } = open(brl('100.00'));
     wallet.debit(move(brl('100.00')));
     expect(wallet.balance.toJSON().amount).toBe('0.00');
+  });
+
+  test('credit beyond the NUMERIC(20,2) range throws BalanceLimitExceededError, wallet intact', () => {
+    const { wallet } = open(brl('999999999999999999.99'));
+    expect(() => wallet.credit(move(brl('0.01')))).toThrow(BalanceLimitExceededError);
+    expect(wallet.balance.toJSON().amount).toBe('999999999999999999.99');
+    expect(wallet.version).toBe(1);
   });
 
   test('credit/debit in another currency throws CurrencyMismatchError', () => {
