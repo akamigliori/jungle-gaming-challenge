@@ -622,7 +622,7 @@ function printReport(summary: Summary, ok: boolean): void {
   row('Wallets com requisição de resultado incerto', verification.walletsWithUncertainRequests);
   log('Limites desta medição');
   log(
-    '  Uma única máquina de 8 GB: gerador, três instâncias, Postgres e LocalStack dividem CPU e memória;',
+    '  Uma única máquina: gerador, três instâncias, Postgres e LocalStack dividem CPU e memória;',
   );
   log('  o número é um piso para esta máquina, não a capacidade do sistema. Rede é loopback.');
   log(`\nVeredito: ${ok ? 'APROVADO' : 'REPROVADO'}`);
