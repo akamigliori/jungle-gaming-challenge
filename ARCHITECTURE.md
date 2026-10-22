@@ -667,7 +667,7 @@ terminou em 0,1 s a 0,3 s. O tempo é dominado pela recuperação das falhas, n�
 a mensagem em voo na instância morta só volta depois do visibility timeout (5 s no teste, segurando
 o grupo da wallet), e uma pendência reservada pelo worker da instância morta só volta quando o
 lease vence (3 s no teste; com o padrão de 30 s, uma execução levou 33 s). Não é um teste de
-carga: a vazão sem falhas não foi medida.
+carga: a vazão sem falhas está na seção 16.
 
 **Worker de pendências no desligamento.** O worker termina o lote reservado inteiro (até 50 itens,
 cada um uma transação curta) antes de sair. Parar no meio deixaria o resto reservado até o lease
@@ -691,6 +691,31 @@ Desenho planejado (Keycloak, OIDC):
 Os endpoints de health (`/health/live`, `/health/ready`) e `/metrics` são marcados com `@Public()` e continuam
 abertos. Mensagens da fila são tratadas como canal interno confiável, mas a identidade do provedor
 na mensagem passa pelas mesmas validações de domínio.
+
+### Como seria implementado
+
+A autenticação ficou de fora por escolha: ela não pontua e competiria com correção financeira,
+concorrência e idempotência. O ponto de extensão existe e está testado como no-op; o caminho abaixo
+é o que seria feito, em ordem, sem mudar o domínio nem os casos de uso.
+
+| Etapa | O que muda | Onde |
+|---|---|---|
+| 1. Identidade | `JwtProviderIdentity` implementa `ProviderIdentityPort`: valida o bearer token (assinatura por JWKS com cache e atualização quando aparece um `kid` desconhecido, `iss`, `aud`, `exp`, tolerância de relógio de 30 s) e devolve o `providerId` de uma claim do client | `infrastructure/auth` (biblioteca `jose`) |
+| 2. Guard | o `AuthGuard` deixa de ser no-op: sem token ou token inválido → `401 UNAUTHORIZED`; rotas `@Public()` seguem abertas | `infrastructure/auth/auth.guard.ts` |
+| 3. Provedor do token × provedor do corpo | `providerId` do token diferente do corpo, ou de um `GET` de outro provedor → `403` com código próprio (hoje `401` e `403` colapsam no mesmo código, ver seção 19); `GET` de transação de outro provedor responde `404`, sem revelar que existe | guard e controllers |
+| 4. Escopos | `wagers:submit`, `wagers:read` e `wallets:manage` (criar wallet e reconciliar, operações de back-office) no token; rota sem o escopo → `403` | decorator de escopo, negado por padrão |
+| 5. Configuração | `AUTH_ENABLED` (desligado por padrão, para a demonstração e os testes), `OIDC_ISSUER`, `OIDC_AUDIENCE`, `OIDC_JWKS_URI`, validadas no boot | `infrastructure/config` |
+| 6. Infraestrutura | Keycloak num profile `auth` do Compose, com realm importado (um client por provedor, `client_credentials`) e heap limitado; não sobe junto com as três instâncias e o teste de carga numa máquina de 8 GB | `docker-compose.yml` |
+| 7. Testes | unitários do guard com um par de chaves gerado no teste e JWKS local (token válido, expirado, `aud` errado, assinatura errada, provedor trocado, health aberto); integração contra o Keycloak real, no profile `auth` | `test/unit`, `test/integration` |
+
+**Trade-offs.**
+
+| Ponto | Decisão | Motivo |
+|---|---|---|
+| Validação do token | local, por JWKS em cache; sem chamar o IdP a cada requisição | não coloca o IdP no caminho crítico nem soma latência |
+| Revogação | tokens de vida curta (minutos); sem lista de revogação | revogar de verdade exigiria introspecção a cada chamada; para APIs servidor a servidor o TTL curto basta |
+| Fila | canal interno confiável: quem escreve na fila é autenticado pelo IAM da AWS, e o `providerId` da mensagem passa pelas mesmas validações de domínio | não há bearer token em mensagem SQS |
+| Mensagem cujo `providerId` não é o de quem a produziu | não é verificada: é o preço de tratar a fila como canal confiável | restringir exigiria um atributo assinado na mensagem; quem controla a fila já controla o sistema |
 
 ## 15. Observabilidade e health checks
 
@@ -781,7 +806,94 @@ na mensagem passa pelas mesmas validações de domínio.
   verificação com timeout de 2 s; `503` indicando qual dependência está `down`. O cliente SQS não
   faz retry interno e tem timeout de conexão e de requisição, para não travar a verificação.
 
-## 16. Decisões de projeto
+## 16. Teste de carga
+
+`bun run test:load` (`scripts/load.ts`) é um teste de carga sem meta de vazão: o que importa é a
+latência e a vazão medidas com honestidade e, acima de tudo, a prova de que nada se perdeu sob
+carga. Roda contra as três instâncias do Compose (`docker compose --profile app up -d --build --wait`).
+
+**Metodologia.**
+
+- 200 wallets criadas por `POST /wallets` com saldo inicial de `1000000.00`; 5 delas são
+  "quentes" e recebem 30% das novas `BET`, para forçar disputa pelo lock da wallet.
+- 32 usuários virtuais, cada um sequencial (envia a próxima requisição só quando recebe a resposta),
+  durante 60 s, com as requisições distribuídas em rodízio entre as três instâncias. Cada
+  requisição escolhe um cenário: `BET` (maioria, de 1.00 a 20.00), `WIN` e `REFUND` sobre uma `BET`
+  anterior já processada (`referenceExternalTransactionId`), repetição idêntica (mesma
+  `Idempotency-Key` e mesmo corpo, esperando `idempotentReplay: true`) e `BET` de valor impossível
+  (`422 INSUFFICIENT_FUNDS`). Todo `externalTransactionId` leva um prefixo único da execução.
+- Resultados esperados do negócio (`201`, replay, `422`) não contam como erro; erro é `5xx` ou falha
+  de rede. Qualquer outra resposta inesperada também reprova a execução.
+- Antes e depois do tráfego o script lê o `/metrics` das três instâncias e soma a diferença dos
+  contadores; o backlog da outbox é amostrado uma vez por segundo durante o tráfego e depois
+  acompanhado até zerar.
+- **Prova de corretude**, ao final: `POST /wallets/:id/reconciliation` para as 200 wallets (todas
+  precisam voltar `consistent: true`), nenhum saldo negativo, e o saldo gravado de cada wallet
+  igual ao que o próprio script calculou, em centavos (`bigint`), somando só as respostas
+  processadas (a réplica não conta). O código de saída é diferente de zero se qualquer dessas
+  condições, um `5xx`/erro de rede ou a outbox não esvaziar dentro do prazo falhar.
+
+**Ambiente.** AMD Ryzen 7 3700U (4 núcleos, 8 threads), 5,7 GB de RAM visíveis ao sistema, Bun 1.4.3,
+Docker. Três instâncias da aplicação com `mem_limit` de 256 MB, Postgres 17 (256 MB) e LocalStack
+(512 MB) no mesmo Compose. **O gerador de carga roda na mesma máquina e disputa CPU com o sistema
+testado**, e a rede é o loopback.
+
+**Resultados** (duas execuções de 60 s, seguidas, depois de um aquecimento de 20 s):
+
+| | Execução 1 | Execução 2 |
+|---|---|---|
+| Requisições | 17.329 | 17.453 |
+| Vazão | 288,1 req/s | 290,4 req/s |
+| Latência p50 / p95 / p99 / máx | 85,7 / 287,8 / 520,1 / 1469,3 ms | 82,9 / 292,5 / 566,8 / 1529,6 ms |
+| Wallets quentes p50 / p95 / p99 | 150,4 / 467,4 / 695,6 ms | 146,2 / 493,5 / 788,2 ms |
+| Demais wallets p50 / p95 / p99 | 72,1 / 154,3 / 194,4 ms | 69,1 / 154,7 / 197,6 ms |
+| Status | 16.818 × `201`, 511 × `422` | 16.919 × `201`, 534 × `422` |
+| Erros (`5xx` ou rede) | 0 | 0 |
+| Replays detectados (`wagering_duplicates_total`) | 1.603 | 1.588 |
+| Conflitos de lock / retries (`wagering_lock_conflicts_total`, `wagering_retries_total`) | 0 / 0 | 0 / 0 |
+| Tempo médio do caso de uso (servidor) | 102,5 ms | 101,7 ms |
+| Outbox: pico de pendentes / lag durante o tráfego | 20.659 / 40 s | 20.441 / 39,4 s |
+| Tempo para a outbox esvaziar depois do tráfego | 84,1 s | 82,4 s |
+| Wallets reconciliadas como consistentes | 200 de 200 | 200 de 200 |
+| Saldos negativos / saldo diferente do esperado | 0 / 0 | 0 / 0 |
+
+**Análise.**
+
+- **O gargalo observado é o publisher da outbox, e não o caminho HTTP.** Cada transação grava
+  aproximadamente dois eventos na outbox, o que dá em torno de 520 eventos/s de produção contra
+  uma publicação de 190 a 240 eventos/s somando as três instâncias (estimada pelo backlog: cerca
+  de 11 mil publicados durante os 60 s e 20 mil drenados em 83 s depois). O backlog cresce de forma
+  linear durante o tráfego, o lag chega a 40 s e só zera cerca de 80 s depois que o tráfego para.
+  Isso não perde nem duplica nada (a corretude passou), mas mostra que, nessa vazão, a
+  consistência eventual para os consumidores dos eventos fica atrasada em dezenas de segundos. A
+  causa provável é o publisher enviar um `SendMessage` por evento ao LocalStack, em lotes de 50
+  com uma wallet por vez em ordem; isso não foi perfilado, é uma hipótese.
+- **A CPU da máquina inteira satura.** Numa amostra do `docker stats` durante uma execução, cada
+  instância usava de 74% a 81% de um núcleo, o Postgres cerca de 200% (e 249 MiB dos 256 MiB do
+  limite) e o LocalStack 63%, fora o gerador de carga. Com gerador, banco e instâncias na mesma
+  máquina, não dá para separar quanto da latência é do sistema e quanto é do gerador.
+- **A disputa pelo lock de uma wallet aparece como latência, não como erro.** As 5 wallets
+  quentes têm p50 cerca de duas vezes o das demais e p99 três a quatro vezes maior, porque as
+  transações da mesma wallet se enfileiram no `SELECT … FOR UPDATE`. Nenhuma execução teve
+  nenhum conflito de lock (`lock_timeout`, deadlock ou serialização) nem retry: a espera coube
+  dentro do `lock_timeout`, e a correção do saldo não depende de sorte.
+- **Pool de conexões: o teste não o isolou como gargalo.** Com 32 usuários virtuais para três
+  instâncias de 10 conexões cada, não houve erro de pool, mas a aplicação não expõe métrica de
+  espera por conexão, e o Postgres (CPU e memória) se esgota antes. Por isso a configuração do
+  pool não mudou.
+
+**O que os números não significam.** Não são a capacidade do sistema: são o que esta combinação
+(máquina de notebook, gerador de carga no mesmo hardware, banco com 256 MB, SQS emulado pelo
+LocalStack) entrega. A latência medida inclui a disputa por CPU com o próprio gerador. Os usuários
+são sequenciais, então a vazão é limitada pela latência (carga em laço fechado); um gerador em
+laço aberto, com taxa fixa, mediria melhor o ponto de saturação. O tráfego é sintético: 12%
+de replays, 3% de saldo insuficiente e 5 wallets quentes são escolhas do experimento, não
+um perfil real. A prova de corretude, ao contrário, não depende da máquina: vale para qualquer
+vazão.
+
+**Como reproduzir.** Ver "Teste de carga" no README.
+
+## 17. Decisões de projeto
 
 As decisões abaixo complementam as das seções anteriores (cada uma explica a sua no ponto onde
 aparece). Formato: decisão, alternativas consideradas e motivo.
@@ -805,7 +917,7 @@ aparece). Formato: decisão, alternativas consideradas e motivo.
 | Erros do body-parser (`http-errors` com `expose: true`) viram `INVALID_PAYLOAD` preservando o status | deixar cair em `500` | corpo grande demais devolve `413` e o provedor sabe que deve corrigir a requisição |
 | Erros `5xx`, inclusive de `DomainError`, saem com mensagem genérica; o detalhe fica só no log | ecoar a mensagem do erro | evita vazar detalhe interno ao cliente |
 | Falha de inicialização escrita como uma linha JSON (`level: fatal`) e saída com código 1 | deixar a promessa rejeitada sem tratamento | o orquestrador enxerga a falha e o log não perde o motivo |
-| Pool de conexões do MikroORM no padrão (2 a 10 por instância), sem variável nova | `DB_POOL_MAX` configurável | 200 requisições simultâneas passam sem erro; com N instâncias, N × 10 cabe em `max_connections = 100`; vira variável só se o teste de carga mostrar o pool como gargalo |
+| Pool de conexões do MikroORM no padrão (2 a 10 por instância), sem variável nova | `DB_POOL_MAX` configurável | 200 requisições simultâneas passam sem erro; com N instâncias, N × 10 cabe em `max_connections = 100`; vira variável só se o teste de carga mostrar o pool como gargalo; o teste (seção 16) não o apontou, e o Postgres satura antes |
 
 ### Schema
 
@@ -843,15 +955,33 @@ aparece). Formato: decisão, alternativas consideradas e motivo.
 | Testes de falha do consumer com filas e instância próprias e provider trocado | usar a instância compartilhada da suíte | a instância compartilhada consumiria as mensagens e um long poll abortado de outra instância poderia recebê-las |
 | Sem mocks de banco ou fila nos testes de integração | repositórios e cliente SQS falsos | o enunciado exige Postgres e LocalStack reais; só se troca um provider para provocar uma falha específica |
 
-## 17. Limitações conhecidas
+### O que ficou de fora de propósito
+
+Prioridade do projeto: correção financeira, concorrência, idempotência e mensageria primeiro, e a
+opção mais simples quando houver dúvida. Estes itens foram avaliados e deixados de fora; cada um
+diz o que custaria e como entraria.
+
+| Item | Por que ficou de fora | Como entraria |
+|---|---|---|
+| Autenticação com IdP | o enunciado a trata como opcional e fora da pontuação; competiria com o resto | seção 14, "Como seria implementado" |
+| Ledger de partidas dobradas | diferencial opcional; o ledger de lançamento simples já é auditável e reconciliável, e um segundo lado de cada lançamento dobraria as escritas na transação mais disputada | contas de contrapartida por moeda e uma restrição diferida que exija soma zero por transação |
+| Gateway na borda (limite de taxa, timeouts) | infraestrutura de implantação, fora do que o serviço garante; `lock_timeout` e `statement_timeout` já limitam quanto tempo uma requisição segura o banco | proxy reverso na frente das instâncias, com limite por IP e `/metrics` só na rede interna |
+| Tracing distribuído e painéis | o serviço expõe logs com ids, métricas Prometheus e health; tracing e painéis pesam numa máquina de 8 GB e não mudam a correção | coletor OTLP e um dashboard sobre as métricas já expostas (seção 19) |
+| Auditoria de submissões inválidas | decisão da seção 4: o que falha antes de existir uma transação válida devolve o erro e fica em log e métrica (no SQS, vai para a DLQ com o código); só a rejeição de negócio é gravada | tabela própria de recusas, com retenção, fora da tabela de transações |
+| Lote por wallet no consumer | otimização de vazão; o gargalo medido no teste de carga é o publisher da outbox, não o consumer | seção 19 |
+| Autorização por escopo e isolamento entre provedores | depende da autenticação | seção 14, etapas 3 e 4 |
+
+## 18. Limitações conhecidas
 
 - `TRUNCATE` não dispara os triggers de linha que tornam o ledger append-only. Ele é usado apenas
   nos testes para limpar o banco; em produção o usuário da aplicação não deve ter permissão de
   `TRUNCATE`.
 - Autenticação ainda não implementada (ver seção 14): qualquer cliente que alcance a API pode
   submeter transações em nome de qualquer provedor.
-- Não há teste de carga: os testes de concorrência provam a correção sob disputa (até 200
-  requisições simultâneas e três instâncias), mas não medem vazão nem latência sob volume.
+- O teste de carga (seção 16) roda com o gerador na mesma máquina do sistema testado, em laço
+  fechado, com tráfego sintético: serve de comparação entre execuções nesta máquina, não de
+  estimativa de capacidade. A publicação da outbox não acompanha a produção de eventos nessa
+  vazão e o backlog cresce durante o tráfego.
 - A chave de idempotência e o `externalTransactionId` são independentes: reenviar a mesma operação
   de negócio com uma chave nova e o mesmo `externalTransactionId` é `409 IDEMPOTENCY_CONFLICT`, e o
   provedor corrige usando um `externalTransactionId` novo.
@@ -902,7 +1032,7 @@ aparece). Formato: decisão, alternativas consideradas e motivo.
   longo (um índice numa tabela grande, por exemplo) seria cancelada; ela precisa de
   `SET LOCAL statement_timeout = 0` no início, ou o script de migração precisa usar outro valor.
 
-## 18. Próximos passos
+## 19. Próximos passos
 
 - **Alertas** sobre as métricas já expostas (outbox lag crescendo, `wagering_dlq_messages_total`
   subindo, conflitos de lock) e um dashboard: hoje só há o endpoint de coleta.
@@ -911,11 +1041,12 @@ aparece). Formato: decisão, alternativas consideradas e motivo.
 - **Ack em lote** (`DeleteMessageBatch`) no consumer, para reduzir chamadas ao SQS sob carga.
 - **Usuário de banco só com DML** para a aplicação (`SELECT`, `INSERT`, `UPDATE`), sem `TRUNCATE`
   nem DDL; as migrations rodam com outro usuário.
-- **Autenticação real com Keycloak** (desenho na seção 14): client credentials por provedor,
+- **Autenticação real com Keycloak** (etapas e trade-offs na seção 14, "Como seria implementado"): client credentials por provedor,
   validação do token por JWKS no `AuthGuard` e `ProviderIdentityPort` comparando o `providerId` das
   claims com o do corpo. Entraria como um futuro profile `auth` do Compose, com heap limitado.
-- **Teste de carga** (por exemplo k6 contra as três instâncias) para medir vazão, latência e o
-  tamanho certo do pool de conexões (hoje 10 por instância).
+- **Publicar a outbox em lote** (`SendMessageBatch`) e perfilar o publisher: é o gargalo
+  observado no teste de carga (seção 16). Junto, uma métrica de espera por conexão do pool para
+  decidir o tamanho dele (hoje 10 por instância).
 - **Retenção da outbox**: job que apaga as linhas já publicadas depois de um prazo.
 - **FK composta no ledger** `(transaction_id, wallet_id)` para `wager_transactions`, o que exige
   um `UNIQUE (id, wallet_id)` extra nessa tabela.
