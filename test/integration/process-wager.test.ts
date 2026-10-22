@@ -63,9 +63,9 @@ interface Counts {
 /** Transações de aposta (sem as OPENING), lançamentos do ledger e eventos na outbox. */
 async function counts(): Promise<Counts> {
   const [row] = await sql<Record<keyof Counts, string>>(`
-    SELECT (SELECT count(*) FROM wager_transactions WHERE kind <> 'OPENING') AS transactions,
-           (SELECT count(*) FROM wallet_ledger_entries) AS ledger,
-           (SELECT count(*) FROM outbox_messages) AS outbox`);
+    SELECT (SELECT COUNT(*) FROM wager_transactions WHERE kind <> 'OPENING') AS transactions,
+           (SELECT COUNT(*) FROM wallet_ledger_entries) AS ledger,
+           (SELECT COUNT(*) FROM outbox_messages) AS outbox`);
   return {
     transactions: Number(row?.transactions),
     ledger: Number(row?.ledger),

@@ -53,10 +53,10 @@ const sql = <T = Record<string, unknown>>(query: string, params: unknown[] = [])
 
 async function counts(): Promise<Record<string, number>> {
   const [row] = await sql<Record<string, string>>(`
-    SELECT (SELECT count(*) FROM wallets) AS wallets,
-           (SELECT count(*) FROM wager_transactions) AS transactions,
-           (SELECT count(*) FROM wallet_ledger_entries) AS ledger,
-           (SELECT count(*) FROM outbox_messages) AS outbox`);
+    SELECT (SELECT COUNT(*) FROM wallets) AS wallets,
+           (SELECT COUNT(*) FROM wager_transactions) AS transactions,
+           (SELECT COUNT(*) FROM wallet_ledger_entries) AS ledger,
+           (SELECT COUNT(*) FROM outbox_messages) AS outbox`);
   return Object.fromEntries(Object.entries(row ?? {}).map(([k, v]) => [k, Number(v)]));
 }
 
@@ -463,7 +463,7 @@ describe('reconciliation invariant', () => {
 
     const [row] = await sql<{ balance: string; ledger_sum: string }>(
       `SELECT w.balance,
-              COALESCE(SUM(CASE l.direction WHEN 'CREDIT' THEN l.amount ELSE -l.amount END), 0)::numeric(20,2) AS ledger_sum
+              COALESCE(SUM(CASE l.direction WHEN 'CREDIT' THEN l.amount ELSE -l.amount END), 0)::NUMERIC(20,2) AS ledger_sum
          FROM wallets w LEFT JOIN wallet_ledger_entries l ON l.wallet_id = w.id
         WHERE w.id = ? GROUP BY w.balance`,
       [created.body.id],

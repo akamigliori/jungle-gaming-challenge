@@ -34,7 +34,7 @@ export async function assertLedgerInvariant(orm: MikroORM): Promise<void> {
         LEFT JOIN wallet_ledger_entries l ON l.wallet_id = w.id
        GROUP BY w.id, w.balance, w.version
     )
-    SELECT id, balance, version, ledger_sum::text, entries::text, min_version, max_version
+    SELECT id, balance, version, ledger_sum::TEXT, entries::TEXT, min_version, max_version
       FROM totals
      WHERE balance <> ledger_sum
         OR (entries = 0 AND (version <> 1 OR balance <> 0))
