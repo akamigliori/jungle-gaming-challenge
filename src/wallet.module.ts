@@ -14,10 +14,12 @@ import { CreateWalletUseCase } from './application/wallet/create-wallet.use-case
 import { MikroOrmTransactionRunner } from './infrastructure/persistence/mikro-orm-transaction-runner';
 import { isTransientDbError, isWagerUniqueViolation } from './infrastructure/persistence/pg-errors';
 import { LedgerQuery } from './infrastructure/persistence/queries/ledger.query';
+import { WagerTransactionQuery } from './infrastructure/persistence/queries/wager-transaction.query';
 import { MikroOrmLedgerRepository } from './infrastructure/persistence/repositories/mikro-orm-ledger.repository';
 import { MikroOrmOutboxRepository } from './infrastructure/persistence/repositories/mikro-orm-outbox.repository';
 import { MikroOrmWagerTransactionRepository } from './infrastructure/persistence/repositories/mikro-orm-wager-transaction.repository';
 import { MikroOrmWalletRepository } from './infrastructure/persistence/repositories/mikro-orm-wallet.repository';
+import { WageringController } from './interfaces/http/wagering/wagering.controller';
 import { WalletsController } from './interfaces/http/wallets/wallets.controller';
 
 const USE_CASE_DEPS = [
@@ -36,7 +38,7 @@ const USE_CASE_DEPS = [
  * a classificação dos erros do Postgres entra como funções, sem a aplicação importar a infraestrutura.
  */
 @Module({
-  controllers: [WalletsController],
+  controllers: [WalletsController, WageringController],
   providers: [
     { provide: TRANSACTION_RUNNER, useClass: MikroOrmTransactionRunner },
     { provide: WALLET_REPOSITORY, useClass: MikroOrmWalletRepository },
@@ -44,6 +46,7 @@ const USE_CASE_DEPS = [
     { provide: LEDGER_REPOSITORY, useClass: MikroOrmLedgerRepository },
     { provide: OUTBOX_REPOSITORY, useClass: MikroOrmOutboxRepository },
     LedgerQuery,
+    WagerTransactionQuery,
     {
       provide: CreateWalletUseCase,
       inject: USE_CASE_DEPS,
