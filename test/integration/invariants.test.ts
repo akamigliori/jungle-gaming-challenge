@@ -83,17 +83,17 @@ beforeEach(async () => {
 });
 
 describe('assertLedgerInvariant', () => {
-  test('cadeia de saldos íntegra passa', async () => {
+  test('passes with an intact balance chain', async () => {
     await seedWallet('100.00', '90.00');
     await assertLedgerInvariant(orm);
   });
 
-  test('balance_before da v2 diferente do balance_after da v1 é divergência', async () => {
+  test('flags v2 balance_before different from v1 balance_after', async () => {
     await seedWallet('50.00', '40.00');
     await expect(assertLedgerInvariant(orm)).rejects.toThrow('ledger invariant violated');
   });
 
-  test('primeira entrada com balance_before diferente de zero é divergência', async () => {
+  test('flags a first entry with non-zero balance_before', async () => {
     await seedWallet('150.00', '140.00', '50.00', '150.00');
     await expect(assertLedgerInvariant(orm)).rejects.toThrow('ledger invariant violated');
   });
