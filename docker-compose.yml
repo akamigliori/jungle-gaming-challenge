@@ -1,11 +1,10 @@
 # Definição compartilhada das instâncias da aplicação (profile `app`).
 x-app: &app
   profiles: [app]
-  build: .
   image: wagering-app
   init: true
   mem_limit: 256m
-  # Cobre o prazo de shutdown da aplicação (SHUTDOWN_TIMEOUT_MS)
+  # Precisa cobrir SHUTDOWN_TIMEOUT_MS + 5 s, a saída forçada do main.ts (25 s com os valores padrão)
   stop_grace_period: 30s
   environment:
     DB_HOST: postgres
