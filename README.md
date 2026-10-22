@@ -57,6 +57,7 @@ shutdown terminar as mensagens em andamento. O profile não sobe por padrão, pa
 | `bun run test:integration` | testes de integração (`test/integration`, Postgres e LocalStack reais) |
 | `bun run test:concurrency` | testes de concorrência (`test/concurrency`, requisições HTTP simultâneas contra Postgres real) |
 | `bun run test:multi-instance` | três processos da aplicação contra o mesmo Postgres e as mesmas filas, com `SIGKILL`, `SIGTERM` e reinício no meio do processamento (`test/multi-instance`); o mais pesado, rode por último e sozinho |
+| `bun run test:load` | teste de carga contra as três instâncias do Compose, com reconciliação de todas as wallets ao final (ver "Teste de carga") |
 | `bun run demo` | roteiro narrado contra a API já no ar (ver "Demonstração") |
 | `bun run migration:up` | aplica as migrations pendentes |
 | `bun run migration:down` | reverte a última migration |
@@ -78,6 +79,37 @@ idempotente (mesma resposta, mesmo `transactionId`), conflito de idempotência, 
 chega), uma `BET` entregue pela fila SQS (este passo pode esperar até 40 s pelo consumer), reconciliação e as linhas `wagering_` de `/metrics`.
 Sai com código diferente de zero se algum passo não se comportar como esperado. Variáveis:
 `DEMO_BASE_URL` (padrão `http://localhost:3000`) e as mesmas `SQS_*`/`AWS_*` da aplicação.
+
+## Teste de carga
+
+Com as três instâncias no ar (`docker compose up -d --wait postgres localstack`,
+`bun run migration:up`, `docker compose --profile app up -d --build --wait`):
+
+```bash
+bun run test:load                       # 60 s, 32 usuários virtuais, 200 wallets
+LOAD_DURATION_S=20 bun run test:load    # execução curta
+bun run test:load --json                # resumo em JSON no stdout (o texto vai para o stderr)
+```
+
+O script cria as wallets, gera uma mistura de `BET`, `WIN`, `REFUND`, replays idempotentes e
+saldo insuficiente (parte do tráfego concentrada em poucas wallets, para disputar o lock), mede
+latência e vazão, soma as métricas das instâncias, espera a outbox esvaziar e reconcilia todas as
+wallets. Sai com código diferente de zero se houver `5xx`, resposta inesperada, saldo negativo,
+saldo diferente do esperado, reconciliação inconsistente ou outbox que não esvazia. Metodologia,
+resultados e análise estão na seção 16 do `ARCHITECTURE.md`. Não grava arquivos.
+
+| Variável | Padrão | Efeito |
+|---|---|---|
+| `LOAD_TARGETS` | `http://localhost:3001,http://localhost:3002,http://localhost:3003` | instâncias alvo, em rodízio |
+| `LOAD_DURATION_S` | `60` | duração do tráfego |
+| `LOAD_CONCURRENCY` | `32` | usuários virtuais simultâneos |
+| `LOAD_WALLETS` | `200` | wallets criadas |
+| `LOAD_HOT_WALLETS` | `5` | wallets "quentes" (as primeiras) |
+| `LOAD_HOT_RATIO` | `0.3` | fração das novas `BET` enviada às wallets quentes |
+| `LOAD_DRAIN_TIMEOUT_S` | `180` | prazo para a outbox esvaziar |
+
+O gerador roda na mesma máquina do sistema testado e disputa CPU com ele: os números servem para
+comparar execuções nesta máquina, não como capacidade.
 
 ## CI
 
