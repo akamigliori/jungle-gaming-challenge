@@ -64,6 +64,12 @@ src/
 | `IDEMPOTENCY_CONFLICT` | mesma `Idempotency-Key` com payload diferente | corrigir |
 | `INTERNAL_ERROR` | falha permanente de infraestrutura (`FAILED`) | investigar |
 
+Nos códigos `REJECTED` marcados como "corrigir" (`CURRENCY_MISMATCH`, `PLAYER_MISMATCH`,
+`REFERENCE_MISMATCH`, `INVALID_REFERENCE_KIND`, `AMOUNT_MISMATCH`), a transação rejeitada é
+terminal: reenviar o payload corrigido com a mesma chave ou o mesmo `externalTransactionId`
+devolve `409`. A correção deve ir como uma nova transação (novo `externalTransactionId` e nova
+`Idempotency-Key`).
+
 Códigos usados apenas na API HTTP (não são `failureCode` de transação): `WALLET_ALREADY_EXISTS`,
 `NOT_FOUND`, `UNAUTHORIZED`, `SERVICE_UNAVAILABLE`.
 
@@ -71,8 +77,8 @@ Códigos usados apenas na API HTTP (não são `failureCode` de transação): `WA
 
 - **Não gravados** — falham antes de existir uma transação válida; não geram evento na outbox e
   ficam visíveis em log/métrica: `INVALID_PAYLOAD`, `INVALID_MONEY`, `REFERENCE_REQUIRED` (`400`),
-  `WALLET_NOT_FOUND` (`404`), `IDEMPOTENCY_CONFLICT` (`409`). Via SQS são erros de negócio: a
-  mensagem é confirmada (ack) sem efeito.
+  `WALLET_NOT_FOUND` (`404`), `IDEMPOTENCY_CONFLICT` (`409`). Comportamento planejado para o consumer SQS (ainda não
+  implementado): são erros de negócio, e a mensagem é confirmada (ack) sem efeito.
 - **Gravados como `REJECTED`** — auditáveis, devolvidos em replay com `idempotentReplay: true` e
   publicados como `WagerTransactionRejected`: todos os demais códigos de negócio
   (`CURRENCY_MISMATCH`, `PLAYER_MISMATCH`, `INSUFFICIENT_FUNDS`, `REVERSAL_INSUFFICIENT_FUNDS`,
@@ -209,7 +215,7 @@ ordem; a primeira regra violada decide o `failureCode`:
 
 Corpo do `POST`: `{ transactionId, status, balance, idempotentReplay }`; no `422` o corpo também
 traz `error: { code, message, retryable }`. `balance` é o saldo depois da transação (em
-`REJECTED`, o saldo observado na decisão; em `PENDING_REFERENCE`, `null`). Replay devolve o mesmo
+`REJECTED`, o saldo observado na decisão; em `PENDING_REFERENCE`, `null`; a rejeição por moeda divergente também devolve `null`, porque o saldo é de outra moeda). Replay devolve o mesmo
 status do original com `idempotentReplay: true` e o header `Idempotent-Replayed: true`. O valor
 recomendado para a chave é `"{providerId}:{externalTransactionId}"`, mas não é imposto. Os `GET`s
 leem direto do banco e devolvem um DTO, sem passar pelo agregado.
@@ -257,15 +263,14 @@ contra uma instância com esse pool, sem erro. Com N instâncias, N × 10 conex�
 juntas com `Promise.all` contra Postgres real): saldo `100.00` com duas apostas de `80.00` em 10
 rodadas; a mesma aposta 50 vezes em paralelo; a mesma chave em duas wallets; `REFUND` e `ROLLBACK`
 da mesma `BET` ao mesmo tempo; 10 wallets com 20 apostas cada. Além das respostas HTTP, os testes
-conferem no banco o saldo, o ledger, as transações gravadas e os eventos na outbox. Há ainda um teste de que o lock é por
-wallet e não global: outra conexão segura o `FOR UPDATE` da wallet A e, enquanto isso, uma aposta
+conferem no banco o saldo, o ledger, as transações gravadas e os eventos na outbox. Há ainda um
+teste de que o lock é por wallet e não global: outra conexão segura o `FOR UPDATE` da wallet A e, enquanto isso, uma aposta
 na wallet B recebe `201` em menos de 1 s. Para validar que os testes detectam a falta do lock, o
 `FOR UPDATE` foi removido manualmente numa verificação pontual: quatro dos seis testes falharam (o
 da mesma chave em duas wallets depende só da `UNIQUE`, e o do lock por wallet não depende do lock
-da aplicação). Depois de
-cada teste que grava pela aplicação, um helper confere em SQL que o saldo de cada wallet é igual à
-soma do seu ledger e que as versões do ledger são contínuas (a suíte de schema fica de fora: ela
-grava linhas soltas de propósito para provocar cada constraint).
+da aplicação). Depois de cada teste que grava pela aplicação, um helper confere em SQL que o saldo
+de cada wallet é igual à soma do seu ledger e que as versões do ledger são contínuas (a suíte de
+schema fica de fora: ela grava linhas soltas de propósito para provocar cada constraint).
 
 ## 10. Idempotência e replay
 
@@ -283,7 +288,9 @@ grava linhas soltas de propósito para provocar cada constraint).
   consulta sempre a enxerga.
 - **Replay devolve o resultado original.** Transações terminais (`PROCESSED`, `REJECTED`) nunca
   mudam: o replay devolve o mesmo status, o mesmo `failureCode` e o `balance` gravado na época,
-  mesmo que o saldo tenha mudado depois. Uma transação `PENDING_REFERENCE` devolve o seu estado
+  mesmo que o saldo tenha mudado depois. A rejeição por moeda divergente não tem saldo observado,
+  porque o saldo é de outra moeda: `balance` é `null` na resposta original, no replay e nos `GET`s.
+  Uma transação `PENDING_REFERENCE` devolve o seu estado
   atual (`202` enquanto pendente); quando o processamento das pendências existir e a resolver, o
   replay passa a devolver o resultado final. O replay nunca tenta resolver a referência na hora.
 - **Falha no COMMIT.** Se a conexão cai durante o `COMMIT`, o cliente não sabe se a transação foi
@@ -362,9 +369,11 @@ o worker ligado publicando os eventos de uma wallet nova de ponta a ponta. Os te
 relógio (`Clock` injetado) para avançar além do lease sem esperar.
 
 **Ordem: melhor esforço.** Dentro de um ciclo, eventos da mesma wallet saem na ordem gravada, e o
-`MessageGroupId` por wallet mantém essa ordem dentro da fila FIFO. Uma falha não inverte a ordem
-num mesmo publisher: a wallet para no evento que falhou e os seguintes voltam junto com ele. Mas,
-com vários publishers, eventos da mesma wallet ainda podem sair fora de ordem (dois lotes da mesma
+`MessageGroupId` por wallet mantém essa ordem dentro da fila FIFO. Dentro de um mesmo lote, uma
+falha adia o evento que falhou e os seguintes da mesma wallet, que voltam juntos no ciclo seguinte.
+Mas um evento posterior da mesma wallet (gravado depois da falha, ou fora do `LIMIT` do lote) pode
+ser publicado no ciclo seguinte antes do que falhou, que ainda espera o backoff. Com vários
+publishers, eventos da mesma wallet também podem sair fora de ordem (dois lotes da mesma
 wallet reservados por instâncias diferentes; um lease vencido no meio de um envio lento). Por isso
 `WalletBalanceChanged` carrega `walletVersion`, que o consumidor usa para ordenar ou descartar
 eventos antigos. A garantia final de ordem é o `wallet_version` do ledger, não a fila.
@@ -411,6 +420,9 @@ na mensagem passa pelas mesmas validações de domínio.
 - O lease usa o relógio de cada instância (`Clock`), não o do banco: relógios das instâncias
   precisam estar sincronizados (NTP) com folga bem menor que o lease de 30 s. Um desvio maior só
   causa publicação duplicada (tratada pela deduplicação), nunca perda.
+- Um crédito que levaria o saldo além de `NUMERIC(20,2)` não é validado no domínio: aparece como
+  erro do banco (`500`) e nada é gravado.
+- As linhas publicadas da outbox nunca são removidas; falta um job de retenção.
 - Um lote reservado é publicado em sequência por wallet; se o SQS ficar lento (no pior caso cerca
   de 2,5 s por envio: 1 s para abrir a conexão mais 1,5 s esperando a resposta) e uma wallet tiver
   muitos eventos no mesmo lote, o envio pode passar do lease e outra instância reservar as mesmas
