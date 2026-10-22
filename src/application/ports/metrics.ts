@@ -39,15 +39,18 @@ export interface TransactionRecord {
 
 /**
  * Métricas do processamento, com nomes do negócio. Todos os valores vêm de conjuntos fechados:
- * nunca ids de wallet, transação ou provedor. Chamar sem esperar resposta: uma métrica nunca
- * pode fazer o processamento falhar.
+ * nunca ids de wallet, transação ou provedor. Os métodos são síncronos e só atualizam contadores
+ * em memória: registrar uma métrica não faz I/O nem altera o resultado do processamento.
  */
 export interface Metrics {
-  /** Uma transação nova chegou a um estado final ou pendente (replays não entram). */
+  /**
+   * Uma transação mudou de estado: nova (replays não entram) ou pendente que o worker resolveu ou
+   * rejeitou. A mesma transação pode ser contada duas vezes, então a soma não é o total de transações.
+   */
   transactionRecorded(record: TransactionRecord): void;
   duplicateDetected(type: DuplicateType): void;
   retryScheduled(operation: RetryOperation): void;
-  messageDeadLettered(failureCode: string): void;
+  messageDeadLettered(failureCode: FailureCode): void;
   /** Erro transitório de banco (lock, deadlock, serialização, timeout, conexão). */
   lockConflict(cause: unknown): void;
   processingTimed(channel: ProcessingChannel, outcome: ProcessingOutcome, seconds: number): void;

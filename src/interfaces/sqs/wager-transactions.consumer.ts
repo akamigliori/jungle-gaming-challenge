@@ -18,6 +18,7 @@ import {
   type ProcessWagerResult,
   ProcessWagerTransactionUseCase,
 } from '../../application/wager/process-wager-transaction.use-case';
+import type { FailureCode } from '../../domain/shared/failure-code';
 import type { WagerTransactionKind } from '../../domain/wager/wager-transaction-kind';
 import {
   APP_CONFIG,
@@ -34,7 +35,7 @@ export const CONSUMER_NAME = 'wager-transactions-consumer';
 
 /** Espera depois de um ciclo de recebimento com erro (SQS fora do ar, fila inexistente). */
 const RECEIVE_ERROR_BACKOFF_MS = 1000;
-const INVALID_PAYLOAD_CODE = 'INVALID_PAYLOAD';
+const INVALID_PAYLOAD_CODE: FailureCode = 'INVALID_PAYLOAD';
 /** Visibilidade 0: a mensagem devolvida no shutdown fica disponível na hora para outra instância. */
 const RELEASE_NOW_SECONDS = 0;
 
@@ -307,7 +308,11 @@ export class WagerTransactionsConsumer
    * Envia o mesmo corpo para a DLQ e só então dá ack na principal. Se o processo morrer entre os
    * dois, a mensagem volta, falha de novo e o reenvio é deduplicado pelo SQS (`MessageId` original).
    */
-  private async deadLetter(message: Message, failureCode: string, urls: QueueUrls): Promise<void> {
+  private async deadLetter(
+    message: Message,
+    failureCode: FailureCode,
+    urls: QueueUrls,
+  ): Promise<void> {
     await this.sqs.send(
       new SendMessageCommand({
         QueueUrl: urls.transactionsDlq,

@@ -7,14 +7,9 @@ import type {
   RetryOperation,
   TransactionRecord,
 } from '../../application/ports/metrics';
+import type { FailureCode } from '../../domain/shared/failure-code';
 import { transientErrorCode } from '../persistence/pg-errors';
-
-/** Estado da outbox no momento da leitura. */
-export interface OutboxBacklog {
-  pending: number;
-  /** Idade, em segundos, do evento não publicado mais antigo; 0 se não há pendentes. */
-  oldestAgeSeconds: number;
-}
+import type { OutboxBacklog } from '../persistence/queries/outbox-backlog.query';
 
 export type ReadOutboxBacklog = () => Promise<OutboxBacklog>;
 
@@ -68,6 +63,9 @@ export class PrometheusMetrics implements Metrics {
     registers: [this.registry],
   });
 
+  /** Leitura em andamento: coletas simultâneas ou lentas reaproveitam a mesma consulta. */
+  private inFlight: Promise<OutboxBacklog> | undefined;
+
   private readonly outboxPending = new Gauge({
     name: 'wagering_outbox_pending',
     help: 'Outbox events not yet published (NaN when the database did not answer in time).',
@@ -103,7 +101,7 @@ export class PrometheusMetrics implements Metrics {
     this.retries.inc({ operation });
   }
 
-  messageDeadLettered(failureCode: string): void {
+  messageDeadLettered(failureCode: FailureCode): void {
     this.deadLetters.inc({ failure_code: failureCode });
   }
 
@@ -134,9 +132,20 @@ export class PrometheusMetrics implements Metrics {
       timer = setTimeout(() => resolve(undefined), this.backlogTimeoutMs);
     });
     try {
-      return await Promise.race([this.readBacklog().catch(() => undefined), timeout]);
+      return await Promise.race([this.readBacklogOnce().catch(() => undefined), timeout]);
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  /**
+   * Uma consulta por vez: se a anterior ainda não terminou (banco lento), a coleta seguinte espera
+   * por ela em vez de abrir outra, para que um scrape lento não acumule conexões.
+   */
+  private readBacklogOnce(): Promise<OutboxBacklog> {
+    this.inFlight ??= this.readBacklog().finally(() => {
+      this.inFlight = undefined;
+    });
+    return this.inFlight;
   }
 }

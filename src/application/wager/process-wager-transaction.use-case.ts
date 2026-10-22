@@ -124,12 +124,8 @@ export class ProcessWagerTransactionUseCase {
     redelivered: boolean,
   ): ProcessingOutcome {
     const { metrics } = this.deps;
-    if (redelivered) {
-      metrics.duplicateDetected('inbox_redelivery');
-      return 'replay';
-    }
     if (idempotentReplay) {
-      metrics.duplicateDetected('idempotency_replay');
+      metrics.duplicateDetected(redelivered ? 'inbox_redelivery' : 'idempotency_replay');
       return 'replay';
     }
     metrics.transactionRecorded({
