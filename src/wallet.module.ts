@@ -9,8 +9,10 @@ import {
   type WagerTransactionRepository,
 } from './application/ports/wager-transaction.repository';
 import { WALLET_REPOSITORY, type WalletRepository } from './application/ports/wallet.repository';
+import { ProcessWagerTransactionUseCase } from './application/wager/process-wager-transaction.use-case';
 import { CreateWalletUseCase } from './application/wallet/create-wallet.use-case';
 import { MikroOrmTransactionRunner } from './infrastructure/persistence/mikro-orm-transaction-runner';
+import { isTransientDbError, isWagerUniqueViolation } from './infrastructure/persistence/pg-errors';
 import { LedgerQuery } from './infrastructure/persistence/queries/ledger.query';
 import { MikroOrmLedgerRepository } from './infrastructure/persistence/repositories/mikro-orm-ledger.repository';
 import { MikroOrmOutboxRepository } from './infrastructure/persistence/repositories/mikro-orm-outbox.repository';
@@ -18,9 +20,20 @@ import { MikroOrmWagerTransactionRepository } from './infrastructure/persistence
 import { MikroOrmWalletRepository } from './infrastructure/persistence/repositories/mikro-orm-wallet.repository';
 import { WalletsController } from './interfaces/http/wallets/wallets.controller';
 
+const USE_CASE_DEPS = [
+  TRANSACTION_RUNNER,
+  WALLET_REPOSITORY,
+  WAGER_TRANSACTION_REPOSITORY,
+  LEDGER_REPOSITORY,
+  OUTBOX_REPOSITORY,
+  ID_GENERATOR,
+  CLOCK,
+];
+
 /**
- * Wallets: liga as portas da aplicação aos adaptadores MikroORM. O caso de uso é montado
- * por factory para que a camada de aplicação continue sem decorators do Nest.
+ * Wallets e transações de aposta: liga as portas da aplicação aos adaptadores MikroORM. Os casos
+ * de uso são montados por factory para que a camada de aplicação continue sem decorators do Nest;
+ * a classificação dos erros do Postgres entra como funções, sem a aplicação importar a infraestrutura.
  */
 @Module({
   controllers: [WalletsController],
@@ -33,15 +46,7 @@ import { WalletsController } from './interfaces/http/wallets/wallets.controller'
     LedgerQuery,
     {
       provide: CreateWalletUseCase,
-      inject: [
-        TRANSACTION_RUNNER,
-        WALLET_REPOSITORY,
-        WAGER_TRANSACTION_REPOSITORY,
-        LEDGER_REPOSITORY,
-        OUTBOX_REPOSITORY,
-        ID_GENERATOR,
-        CLOCK,
-      ],
+      inject: USE_CASE_DEPS,
       useFactory: (
         transactionRunner: TransactionRunner,
         wallets: WalletRepository,
@@ -59,6 +64,30 @@ import { WalletsController } from './interfaces/http/wallets/wallets.controller'
           outbox,
           ids,
           clock,
+        }),
+    },
+    {
+      provide: ProcessWagerTransactionUseCase,
+      inject: USE_CASE_DEPS,
+      useFactory: (
+        transactionRunner: TransactionRunner,
+        wallets: WalletRepository,
+        transactions: WagerTransactionRepository,
+        ledger: LedgerRepository,
+        outbox: OutboxRepository,
+        ids: IdGenerator,
+        clock: Clock,
+      ) =>
+        new ProcessWagerTransactionUseCase({
+          transactionRunner,
+          wallets,
+          transactions,
+          ledger,
+          outbox,
+          ids,
+          clock,
+          isTransient: isTransientDbError,
+          isUniqueViolation: isWagerUniqueViolation,
         }),
     },
   ],
