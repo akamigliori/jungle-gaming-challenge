@@ -56,7 +56,7 @@ export interface Metrics {
   /** Erro transitório de banco (lock, deadlock, serialização, timeout, conexão). */
   lockConflict(cause: unknown): void;
   processingTimed(channel: ProcessingChannel, outcome: ProcessingOutcome, seconds: number): void;
-  /** Uma conferência de wallet terminou; a divergente também entra no contador de divergências. */
+  /** Uma conferência de wallet terminou. */
   reconciliationChecked(result: ReconciliationResult): void;
 }
 

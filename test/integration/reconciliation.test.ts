@@ -6,7 +6,6 @@ import { LogCapture } from './support/log-capture';
 import { seriesDelta } from './support/metrics';
 
 const PLAYER_ID = '0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1';
-const DIVERGENCES = 'wagering_reconciliation_divergences_total';
 const RESULT_CONSISTENT = 'wagering_reconciliations_total{result="consistent"}';
 const RESULT_DIVERGENT = 'wagering_reconciliations_total{result="divergent"}';
 
@@ -129,7 +128,7 @@ describe('POST /wallets/:walletId/reconciliation', () => {
     const logsBefore = logs.lines().length;
 
     let body: Report | undefined;
-    const divergences = await seriesDelta(t.baseUrl, DIVERGENCES, async () => {
+    const divergences = await seriesDelta(t.baseUrl, RESULT_DIVERGENT, async () => {
       const res = await reconcile(walletId);
       expect(res.status).toBe(200);
       body = (await res.json()) as Report;
@@ -165,8 +164,6 @@ describe('POST /wallets/:walletId/reconciliation', () => {
       [walletId],
     );
     expect(row).toMatchObject({ balance: '77.77', version: 2 });
-    const divergent = await seriesDelta(t.baseUrl, RESULT_DIVERGENT, () => reconcile(walletId));
-    expect(divergent).toBe(1);
   });
 
   test('a diverging version is flagged', async () => {
@@ -181,18 +178,31 @@ describe('POST /wallets/:walletId/reconciliation', () => {
     const walletId = await createWallet();
     await wager(walletId, 'BET', 'bet-1', '25.00');
     await wager(walletId, 'BET', 'bet-2', '5.00');
-    // o trigger append-only é desligado e religado na mesma transação: fora dela nunca fica aberto
-    await orm.em.transactional(async (em) => {
-      const conn = em.getConnection();
-      await conn.execute('ALTER TABLE wallet_ledger_entries DISABLE TRIGGER ledger_append_only');
+    // o trigger append-only é desligado e religado na mesma transação: se algo falhar, o ROLLBACK
+    // desfaz também o DISABLE, e fora dela o trigger nunca fica aberto
+    const conn = orm.em.getConnection();
+    await conn.transactional(async (trx) => {
+      await conn.execute(
+        'ALTER TABLE wallet_ledger_entries DISABLE TRIGGER ledger_append_only',
+        [],
+        'run',
+        trx,
+      );
       // o último lançamento passa a partir de 60.00 (a aritmética continua válida) e pula uma versão
       await conn.execute(
         `UPDATE wallet_ledger_entries
          SET balance_before = 60.00, balance_after = 55.00, wallet_version = 7
          WHERE wallet_id = ? AND wallet_version = 3`,
         [walletId],
+        'run',
+        trx,
       );
-      await conn.execute('ALTER TABLE wallet_ledger_entries ENABLE TRIGGER ledger_append_only');
+      await conn.execute(
+        'ALTER TABLE wallet_ledger_entries ENABLE TRIGGER ledger_append_only',
+        [],
+        'run',
+        trx,
+      );
     });
 
     const body = (await (await reconcile(walletId)).json()) as Report;
@@ -206,7 +216,15 @@ describe('POST /wallets/:walletId/reconciliation', () => {
   });
 
   test('an unknown wallet answers 404 WALLET_NOT_FOUND and counts nothing', async () => {
-    const res = await reconcile('0192f291-27dd-7d3f-8071-5f8685deef37');
+    const unknown = '0192f291-27dd-7d3f-8071-5f8685deef37';
+    let res: Response | undefined;
+    const consistent = await seriesDelta(t.baseUrl, RESULT_CONSISTENT, async () => {
+      res = await reconcile(unknown);
+    });
+    const divergent = await seriesDelta(t.baseUrl, RESULT_DIVERGENT, () => reconcile(unknown));
+    expect(consistent).toBe(0);
+    expect(divergent).toBe(0);
+    if (!res) throw new Error('no response');
     expect(res.status).toBe(404);
     expect(((await res.json()) as { error: { code: string } }).error.code).toBe('WALLET_NOT_FOUND');
   });

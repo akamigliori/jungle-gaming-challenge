@@ -10,6 +10,7 @@ const consistent: WalletLedgerSnapshot = {
   difference: '0.00',
   ledgerBalance: '975.00',
   matchesLastEntry: true,
+  matchesLedgerSum: true,
   version: 3,
   ledgerVersion: 3,
   entries: 3,
@@ -41,6 +42,7 @@ describe('findIssues', () => {
       storedBalance: '1000.00',
       difference: '25.00',
       matchesLastEntry: false,
+      matchesLedgerSum: false,
       version: 5,
       brokenLinks: 1,
       versionGaps: 2,
@@ -75,7 +77,7 @@ describe('buildReport', () => {
 
   test('a negative difference is carried as a string', () => {
     const report = buildReport(
-      { ...consistent, storedBalance: '970.00', difference: '-5.00' },
+      { ...consistent, storedBalance: '970.00', difference: '-5.00', matchesLedgerSum: false },
       new Date(0),
     );
     expect(report.consistent).toBe(false);

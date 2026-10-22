@@ -15,6 +15,8 @@ export interface WalletLedgerSnapshot {
   ledgerBalance: string | null;
   /** O saldo gravado é igual ao `balance_after` do último lançamento (ou a zero, sem lançamentos). */
   matchesLastEntry: boolean;
+  /** O saldo gravado é igual à soma assinada dos lançamentos. */
+  matchesLedgerSum: boolean;
   /** Versão gravada em `wallets`. */
   version: number;
   /** Maior `wallet_version` do ledger; `null` se o ledger está vazio. */
