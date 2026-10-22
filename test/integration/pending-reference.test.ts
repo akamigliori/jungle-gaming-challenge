@@ -290,17 +290,16 @@ describe('pending references resolved by the worker', () => {
     expect(await balanceOf(walletId)).toBe('75.00');
   });
 
-  test('a reference that ends REJECTED → the dependent becomes REFERENCE_NOT_PROCESSED within 2 cycles', async () => {
+  test('a reference that ends REJECTED → the dependent is woken and becomes REFERENCE_NOT_PROCESSED without waiting for the backoff', async () => {
     const walletId = await createWallet();
     const refund = await submit(refundOf(walletId, 'bet-1'));
     await postpone(refund.transaction.id);
 
-    const startedAt = Date.now();
     const bet = await submit(command(walletId, { money: { amount: '150.00', currency: 'BRL' } }));
     expect(bet.transaction.status).toBe(WagerTransactionStatus.Rejected);
 
-    const row = await waitStatus(refund.transaction.id, 'REJECTED', 2 * POLL_INTERVAL_MS);
-    expect(Date.now() - startedAt).toBeLessThan(2 * POLL_INTERVAL_MS);
+    // a pendência foi empurrada para daqui a 1 hora: só o "acordar" a traz de volta a tempo
+    const row = await waitStatus(refund.transaction.id, 'REJECTED', 3000);
     expect(row.failure_code).toBe('REFERENCE_NOT_PROCESSED');
     expect(row.reference_attempts).toBe(0);
   });
