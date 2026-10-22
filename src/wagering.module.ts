@@ -14,11 +14,13 @@ import { ProcessWagerTransactionUseCase } from './application/wager/process-wage
 import { isTransientDbError, isWagerUniqueViolation } from './infrastructure/persistence/pg-errors';
 import { WagerTransactionQuery } from './infrastructure/persistence/queries/wager-transaction.query';
 import { WageringController } from './interfaces/http/wagering/wagering.controller';
+import { WagerTransactionsConsumer } from './interfaces/sqs/wager-transactions.consumer';
 
 /**
  * Transações de aposta: o caso de uso é montado por factory para que a camada de aplicação
  * continue sem decorators do Nest; a classificação dos erros do Postgres entra como funções,
- * sem a aplicação importar a infraestrutura. O caso de uso é exportado para outros pontos de entrada.
+ * sem a aplicação importar a infraestrutura. HTTP (controller) e SQS (consumer) chamam o mesmo caso
+ * de uso, que também é exportado para outros pontos de entrada.
  */
 @Module({
   controllers: [WageringController],
@@ -59,6 +61,7 @@ import { WageringController } from './interfaces/http/wagering/wagering.controll
           isUniqueViolation: isWagerUniqueViolation,
         }),
     },
+    WagerTransactionsConsumer,
   ],
   exports: [ProcessWagerTransactionUseCase],
 })

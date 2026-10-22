@@ -22,6 +22,17 @@ export interface AppConfig {
     batchSize: number;
     leaseMs: number;
   };
+  consumer: {
+    enabled: boolean;
+    /** Laços de recebimento independentes por instância. */
+    loops: number;
+    /** Máximo de mensagens por recebimento (limite do SQS: 10). */
+    batchSize: number;
+    /** Duração do long polling (limite do SQS: 20 s). */
+    waitTimeSeconds: number;
+    /** Prazo para as mensagens em andamento terminarem no shutdown. */
+    shutdownTimeoutMs: number;
+  };
   logLevel: string;
 }
 
@@ -45,6 +56,12 @@ const envSchema = z.object({
   OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(250),
   OUTBOX_BATCH_SIZE: z.coerce.number().int().positive().max(1000).default(50),
   OUTBOX_LEASE_MS: z.coerce.number().int().positive().default(30_000),
+  SQS_CONSUMER_ENABLED: z.stringbool().default(true),
+  SQS_CONSUMER_LOOPS: z.coerce.number().int().positive().default(2),
+  // 2 laços × 4 mensagens = 8 transações ao mesmo tempo, deixando conexões do pool de 10 para HTTP e workers
+  SQS_RECEIVE_BATCH_SIZE: z.coerce.number().int().positive().max(10).default(4),
+  SQS_WAIT_TIME_SECONDS: z.coerce.number().int().min(0).max(20).default(10),
+  SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(20_000),
 });
 
 /** Lê e valida as variáveis de ambiente; os defaults servem ao ambiente local do docker-compose. */
@@ -75,6 +92,13 @@ export function loadConfig(env: Env = process.env): AppConfig {
       pollIntervalMs: e.OUTBOX_POLL_INTERVAL_MS,
       batchSize: e.OUTBOX_BATCH_SIZE,
       leaseMs: e.OUTBOX_LEASE_MS,
+    },
+    consumer: {
+      enabled: e.SQS_CONSUMER_ENABLED,
+      loops: e.SQS_CONSUMER_LOOPS,
+      batchSize: e.SQS_RECEIVE_BATCH_SIZE,
+      waitTimeSeconds: e.SQS_WAIT_TIME_SECONDS,
+      shutdownTimeoutMs: e.SHUTDOWN_TIMEOUT_MS,
     },
     logLevel: e.LOG_LEVEL,
   };

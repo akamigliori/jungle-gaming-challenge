@@ -44,3 +44,39 @@ describe('loadConfig SQS queues', () => {
     });
   });
 });
+
+describe('loadConfig SQS consumer', () => {
+  test('defaults: enabled, 2 loops of 4 messages, 10 s long poll, 20 s shutdown', () => {
+    expect(loadConfig({}).consumer).toEqual({
+      enabled: true,
+      loops: 2,
+      batchSize: 4,
+      waitTimeSeconds: 10,
+      shutdownTimeoutMs: 20_000,
+    });
+  });
+
+  test('values come from the environment', () => {
+    expect(
+      loadConfig({
+        SQS_CONSUMER_ENABLED: 'false',
+        SQS_CONSUMER_LOOPS: '3',
+        SQS_RECEIVE_BATCH_SIZE: '10',
+        SQS_WAIT_TIME_SECONDS: '0',
+        SHUTDOWN_TIMEOUT_MS: '5000',
+      }).consumer,
+    ).toEqual({
+      enabled: false,
+      loops: 3,
+      batchSize: 10,
+      waitTimeSeconds: 0,
+      shutdownTimeoutMs: 5000,
+    });
+  });
+
+  test('values outside the SQS limits are rejected', () => {
+    expect(() => loadConfig({ SQS_RECEIVE_BATCH_SIZE: '11' })).toThrow();
+    expect(() => loadConfig({ SQS_WAIT_TIME_SECONDS: '21' })).toThrow();
+    expect(() => loadConfig({ SQS_CONSUMER_LOOPS: '0' })).toThrow();
+  });
+});

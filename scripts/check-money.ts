@@ -12,6 +12,11 @@ const ALLOWED: { file: string; pattern: string; reason: string }[] = [
     reason: 'versão da wallet no cursor da paginação, não dinheiro',
   },
   {
+    file: 'src/interfaces/sqs/wager-transactions.consumer.ts',
+    pattern: 'Number(',
+    reason: 'contador de entregas do SQS (ApproximateReceiveCount), não dinheiro',
+  },
+  {
     file: 'src/domain/shared/money.ts',
     pattern: '.toFixed(',
     reason: 'formatação com escala fixa dentro do próprio Money (decimal.js)',
