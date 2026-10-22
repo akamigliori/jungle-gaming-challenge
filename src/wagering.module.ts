@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { CLOCK, type Clock } from './application/ports/clock';
 import { ID_GENERATOR, type IdGenerator } from './application/ports/id-generator';
+import { INBOX_REPOSITORY, type InboxRepository } from './application/ports/inbox.repository';
 import { LEDGER_REPOSITORY, type LedgerRepository } from './application/ports/ledger.repository';
 import { OUTBOX_REPOSITORY, type OutboxRepository } from './application/ports/outbox.repository';
 import { TRANSACTION_RUNNER, type TransactionRunner } from './application/ports/transaction-runner';
@@ -13,11 +14,13 @@ import { ProcessWagerTransactionUseCase } from './application/wager/process-wage
 import { isTransientDbError, isWagerUniqueViolation } from './infrastructure/persistence/pg-errors';
 import { WagerTransactionQuery } from './infrastructure/persistence/queries/wager-transaction.query';
 import { WageringController } from './interfaces/http/wagering/wagering.controller';
+import { WagerTransactionsConsumer } from './interfaces/sqs/wager-transactions.consumer';
 
 /**
  * Transações de aposta: o caso de uso é montado por factory para que a camada de aplicação
  * continue sem decorators do Nest; a classificação dos erros do Postgres entra como funções,
- * sem a aplicação importar a infraestrutura. O caso de uso é exportado para outros pontos de entrada.
+ * sem a aplicação importar a infraestrutura. HTTP (controller) e SQS (consumer) chamam o mesmo caso
+ * de uso, que também é exportado para outros pontos de entrada.
  */
 @Module({
   controllers: [WageringController],
@@ -30,6 +33,7 @@ import { WageringController } from './interfaces/http/wagering/wagering.controll
         WALLET_REPOSITORY,
         WAGER_TRANSACTION_REPOSITORY,
         LEDGER_REPOSITORY,
+        INBOX_REPOSITORY,
         OUTBOX_REPOSITORY,
         ID_GENERATOR,
         CLOCK,
@@ -39,6 +43,7 @@ import { WageringController } from './interfaces/http/wagering/wagering.controll
         wallets: WalletRepository,
         transactions: WagerTransactionRepository,
         ledger: LedgerRepository,
+        inbox: InboxRepository,
         outbox: OutboxRepository,
         ids: IdGenerator,
         clock: Clock,
@@ -48,6 +53,7 @@ import { WageringController } from './interfaces/http/wagering/wagering.controll
           wallets,
           transactions,
           ledger,
+          inbox,
           outbox,
           ids,
           clock,
@@ -55,6 +61,7 @@ import { WageringController } from './interfaces/http/wagering/wagering.controll
           isUniqueViolation: isWagerUniqueViolation,
         }),
     },
+    WagerTransactionsConsumer,
   ],
   exports: [ProcessWagerTransactionUseCase],
 })

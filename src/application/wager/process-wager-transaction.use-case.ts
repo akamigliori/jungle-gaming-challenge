@@ -3,6 +3,7 @@ import { WagerTransactionPendingReference } from '../../domain/events/wager-tran
 import { WagerTransactionProcessed } from '../../domain/events/wager-transaction-processed';
 import { WagerTransactionRejected } from '../../domain/events/wager-transaction-rejected';
 import { WalletBalanceChanged } from '../../domain/events/wallet-balance-changed';
+import { InboxMessage } from '../../domain/messaging/inbox-message';
 import { OutboxMessage } from '../../domain/messaging/outbox-message';
 import { InvalidPayloadError, InvariantViolationError } from '../../domain/shared/domain-error';
 import { Money, type MoneyProps } from '../../domain/shared/money';
@@ -16,6 +17,7 @@ import { WagerTransactionKind } from '../../domain/wager/wager-transaction-kind'
 import type { Wallet } from '../../domain/wallet/wallet';
 import type { Clock } from '../ports/clock';
 import type { IdGenerator } from '../ports/id-generator';
+import type { InboxReceipt, InboxRepository } from '../ports/inbox.repository';
 import type { LedgerRepository } from '../ports/ledger.repository';
 import type { OutboxRepository } from '../ports/outbox.repository';
 import type { TransactionRunner } from '../ports/transaction-runner';
@@ -38,6 +40,8 @@ export interface ProcessWagerCommand {
   money: MoneyProps;
   referenceExternalTransactionId?: string;
   correlationId: string;
+  /** Recibo da mensagem SQS; ausente nas chamadas HTTP. */
+  inbox?: InboxReceipt;
 }
 
 export interface ProcessWagerResult {
@@ -51,6 +55,7 @@ export interface ProcessWagerDeps {
   wallets: WalletRepository;
   transactions: WagerTransactionRepository;
   ledger: LedgerRepository;
+  inbox: InboxRepository;
   outbox: OutboxRepository;
   ids: IdGenerator;
   clock: Clock;
@@ -71,9 +76,9 @@ interface ValidatedWager {
 }
 
 /**
- * Processa BET, WIN, LOSS, REFUND e ROLLBACK numa única transação SQL: trava a wallet,
- * verifica a idempotência, aplica as regras e grava wallet, transação, ledger e outbox juntos.
- * Ponto de entrada único para HTTP e SQS.
+ * Processa BET, WIN, LOSS, REFUND e ROLLBACK numa única transação SQL: trava a wallet, registra a
+ * inbox, verifica a idempotência, aplica as regras e grava wallet, transação, ledger e outbox
+ * juntos. Ponto de entrada único para HTTP e SQS.
  */
 export class ProcessWagerTransactionUseCase {
   constructor(private readonly deps: ProcessWagerDeps) {}
@@ -121,7 +126,7 @@ export class ProcessWagerTransactionUseCase {
   }
 
   private runOnce(wager: ValidatedWager): Promise<ProcessWagerResult> {
-    const { transactionRunner, wallets, ids, clock } = this.deps;
+    const { transactionRunner, wallets, inbox, ids, clock } = this.deps;
     const { cmd } = wager;
 
     return transactionRunner.run(async () => {
@@ -132,18 +137,32 @@ export class ProcessWagerTransactionUseCase {
         throw new InvariantViolationError('locked wallet differs from the requested wallet');
       }
 
-      // 2. idempotência depois do lock: enxerga a original já commitada
+      // 2. inbox na mesma transação: a entrega só fica registrada se o processamento commitar.
+      // Duplicata segue adiante e cai no replay pela chave de idempotência (a entrega é uma
+      // coisa, a operação de negócio é outra); outro corpo com o mesmo messageId é conflito.
+      if (cmd.inbox) {
+        const receivedAt = clock.now();
+        const message = InboxMessage.receive({ ...cmd.inbox, receivedAt });
+        // a linha só existe se o processamento commitar: recebida e processada no mesmo instante
+        message.markProcessed(receivedAt);
+        const delivery = await inbox.register(message);
+        if (delivery === 'conflict') {
+          throw new IdempotencyConflictError('messageId already used with a different payload');
+        }
+      }
+
+      // 3. idempotência depois do lock: enxerga a original já commitada
       const existing = await this.findExisting(wager);
       if (existing) return { transaction: existing, idempotentReplay: true };
 
-      // 3. transação nova: regras de negócio sobre a wallet travada
+      // 4. transação nova: regras de negócio sobre a wallet travada
       const tx = this.newTransaction(wager);
       const reference = await this.resolveReference(cmd);
       const expectedVersion = wallet.version;
       const at = clock.now();
       const decision = decideWager({ tx, wallet, reference, at, entryId: ids.next() });
 
-      // 4. grava o resultado (aplicado, rejeitado ou pendente) na mesma transação
+      // 5. grava o resultado (aplicado, rejeitado ou pendente) na mesma transação
       await this.record({
         tx,
         wallet,

@@ -4,7 +4,7 @@ import type { WagerTransaction } from '../../../domain/wager/wager-transaction';
 
 /** Tipos que o provedor pode enviar; OPENING é interno e nunca entra pela API. */
 const SUBMITTABLE_KINDS = ['BET', 'WIN', 'LOSS', 'REFUND', 'ROLLBACK'] as const;
-const MAX_TEXT_LENGTH = 255;
+export const MAX_TEXT_LENGTH = 255;
 
 /** UUID aceito em qualquer caixa e normalizado para minúsculas (a mesma wallet, a mesma chave). */
 const normalizedUuid = z.uuid().transform((value) => value.toLowerCase());
