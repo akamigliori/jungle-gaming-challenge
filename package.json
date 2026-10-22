@@ -15,6 +15,7 @@
     "test:concurrency": "bun test test/concurrency --timeout 30000",
     "test:multi-instance": "bun test test/multi-instance --timeout 180000",
     "demo": "bun scripts/demo.ts",
+    "test:load": "bun scripts/load.ts",
     "migration:up": "bun scripts/migrate.ts up",
     "migration:down": "bun scripts/migrate.ts down"
   },
