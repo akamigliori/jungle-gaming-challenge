@@ -2,6 +2,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:tes
 import type { MikroORM } from '@mikro-orm/postgresql';
 import { resetDb, withTestDb } from './support/db';
 
+// Esta suíte grava linhas soltas direto em SQL para provocar cada violação de constraint; elas não
+// representam estados produzidos pela aplicação, então o invariante do ledger não é verificado aqui.
 let orm: MikroORM;
 const run = (sql: string, params: unknown[] = []) => orm.em.getConnection().execute(sql, params);
 

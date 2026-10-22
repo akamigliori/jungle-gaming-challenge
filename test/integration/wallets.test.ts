@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import type { MikroORM } from '@mikro-orm/postgresql';
 import type { LedgerRepository } from '../../src/application/ports/ledger.repository';
 import { LEDGER_REPOSITORY } from '../../src/application/ports/ledger.repository';
@@ -16,6 +16,7 @@ import { WagerTransaction } from '../../src/domain/wager/wager-transaction';
 import { WagerTransactionKind } from '../../src/domain/wager/wager-transaction-kind';
 import { createTestApp, type TestApp } from './support/app';
 import { resetDb, withTestDb } from './support/db';
+import { assertLedgerInvariant } from './support/invariants';
 
 const PLAYER_ID = '0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1';
 const UNKNOWN_WALLET_ID = '0192f291-27dd-7d3f-8071-5f8685deef37';
@@ -96,6 +97,10 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await resetDb(orm);
+});
+
+afterEach(async () => {
+  await assertLedgerInvariant(orm);
 });
 
 describe('POST /wallets', () => {
@@ -338,7 +343,10 @@ describe('GET /wallets/:walletId', () => {
 });
 
 describe('GET /wallets/:walletId/ledger', () => {
-  /** Lança créditos extras (WIN) direto pelos repositórios, numa transação, simulando o processamento. */
+  /**
+   * Lança créditos extras (WIN) direto pelos repositórios, numa transação, simulando o
+   * processamento: trava a wallet, grava transações e ledger e salva o novo saldo.
+   */
   async function appendWins(walletId: string, amounts: string[]): Promise<void> {
     const runner = t.app.get<TransactionRunner>(TRANSACTION_RUNNER);
     const wallets = t.app.get<WalletRepository>(WALLET_REPOSITORY);
@@ -346,8 +354,9 @@ describe('GET /wallets/:walletId/ledger', () => {
     const ledger = t.app.get<LedgerRepository>(LEDGER_REPOSITORY);
 
     await runner.run(async () => {
-      const wallet = await wallets.findById(walletId);
+      const wallet = await wallets.lockById(walletId);
       if (!wallet) throw new Error('wallet not found');
+      const expectedVersion = wallet.version;
       for (const [i, amount] of amounts.entries()) {
         const at = new Date();
         const money = Money.from({ amount, currency: wallet.currency });
@@ -375,6 +384,7 @@ describe('GET /wallets/:walletId/ledger', () => {
         await transactions.add(tx);
         await ledger.append(entry);
       }
+      await wallets.save(wallet, expectedVersion);
     });
   }
 

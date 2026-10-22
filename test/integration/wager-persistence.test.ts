@@ -1,11 +1,14 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import type { MikroORM } from '@mikro-orm/postgresql';
+import type { LedgerRepository } from '../../src/application/ports/ledger.repository';
+import { LEDGER_REPOSITORY } from '../../src/application/ports/ledger.repository';
 import type { TransactionRunner } from '../../src/application/ports/transaction-runner';
 import { TRANSACTION_RUNNER } from '../../src/application/ports/transaction-runner';
 import type { WagerTransactionRepository } from '../../src/application/ports/wager-transaction.repository';
 import { WAGER_TRANSACTION_REPOSITORY } from '../../src/application/ports/wager-transaction.repository';
 import type { WalletRepository } from '../../src/application/ports/wallet.repository';
 import { WALLET_REPOSITORY } from '../../src/application/ports/wallet.repository';
+import { CreateWalletUseCase } from '../../src/application/wallet/create-wallet.use-case';
 import { InvariantViolationError } from '../../src/domain/shared/domain-error';
 import { Money } from '../../src/domain/shared/money';
 import { WagerTransaction } from '../../src/domain/wager/wager-transaction';
@@ -14,6 +17,7 @@ import { Wallet } from '../../src/domain/wallet/wallet';
 import { isTransientDbError } from '../../src/infrastructure/persistence/pg-errors';
 import { createTestApp, type TestApp } from './support/app';
 import { resetDb, withTestDb } from './support/db';
+import { assertLedgerInvariant } from './support/invariants';
 
 const PLAYER_ID = '0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1';
 const CURRENCY = 'BRL';
@@ -24,20 +28,17 @@ let t: TestApp;
 let runner: TransactionRunner;
 let wallets: WalletRepository;
 let transactions: WagerTransactionRepository;
+let ledger: LedgerRepository;
 
 const money = (amount: string) => Money.from({ amount, currency: CURRENCY });
 
-async function createWallet(): Promise<Wallet> {
-  const { wallet } = Wallet.open({
-    id: Bun.randomUUIDv7(),
+/** Wallet com 100.00 criada pelo caso de uso real (transação OPENING e crédito no ledger). */
+function createWallet(): Promise<Wallet> {
+  return t.app.get(CreateWalletUseCase).execute({
     playerId: PLAYER_ID,
-    initialBalance: money('100.00'),
-    openingTransactionId: Bun.randomUUIDv7(),
-    openingEntryId: Bun.randomUUIDv7(),
-    at: new Date(),
+    initialBalance: { amount: '100.00', currency: CURRENCY },
+    correlationId: 'wager-persistence-test',
   });
-  await wallets.add(wallet);
-  return wallet;
 }
 
 function newTransaction(
@@ -67,6 +68,7 @@ beforeAll(async () => {
   runner = t.app.get<TransactionRunner>(TRANSACTION_RUNNER);
   wallets = t.app.get<WalletRepository>(WALLET_REPOSITORY);
   transactions = t.app.get<WagerTransactionRepository>(WAGER_TRANSACTION_REPOSITORY);
+  ledger = t.app.get<LedgerRepository>(LEDGER_REPOSITORY);
 });
 
 afterAll(async () => {
@@ -76,6 +78,10 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await resetDb(orm);
+});
+
+afterEach(async () => {
+  await assertLedgerInvariant(orm);
 });
 
 describe('WalletRepository.lockById', () => {
@@ -130,13 +136,18 @@ describe('WalletRepository.save', () => {
       const locked = await wallets.lockById(wallet.id);
       if (!locked) throw new Error('wallet not found');
       const expectedVersion = locked.version;
-      locked.credit({
-        money: money('10.00'),
-        transactionId: Bun.randomUUIDv7(),
+      const at = new Date();
+      const win = newTransaction(locked, { kind: WagerTransactionKind.Win, money: money('10.00') });
+      const entry = locked.credit({
+        money: win.money,
+        transactionId: win.id,
         entryId: Bun.randomUUIDv7(),
-        at: new Date(),
+        at,
       });
+      win.markProcessed({ at, balanceAfter: locked.balance, walletVersionAfter: locked.version });
       await wallets.save(locked, expectedVersion);
+      await transactions.add(win);
+      await ledger.append(entry);
     });
     const reloaded = await runner.run(() => wallets.findById(wallet.id));
     expect(reloaded?.balance.toJSON().amount).toBe('110.00');
