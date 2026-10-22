@@ -1,3 +1,4 @@
+import type { Writable } from 'node:stream';
 import type { DynamicModule } from '@nestjs/common';
 import { Module } from '@nestjs/common';
 import { APP_FILTER, APP_GUARD } from '@nestjs/core';
@@ -14,11 +15,11 @@ import { WalletModule } from './wallet.module';
 /** Módulo raiz: compõe a infraestrutura, os módulos de negócio, os controllers HTTP e o guard/filtro globais. */
 @Module({})
 export class AppModule {
-  static forRoot(config: AppConfig): DynamicModule {
+  static forRoot(config: AppConfig, logDestination?: Writable): DynamicModule {
     return {
       module: AppModule,
       imports: [
-        InfrastructureModule.forRoot(config),
+        InfrastructureModule.forRoot(config, logDestination),
         PersistenceModule,
         WalletModule,
         WageringModule,

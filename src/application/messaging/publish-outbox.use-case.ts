@@ -14,9 +14,20 @@ export interface PublishOutboxDeps {
   random?: () => number;
 }
 
+/** Mensagem que não saiu neste ciclo: identificadores e o erro, nunca o conteúdo do evento. */
+export interface PublishFailure {
+  eventId: string;
+  eventType: string;
+  aggregateId: string;
+  /** Tentativas já feitas, contando esta. */
+  attempts: number;
+  error: unknown;
+}
+
 export interface PublishOutboxResult {
   published: number;
   failed: number;
+  failures: PublishFailure[];
 }
 
 /**
@@ -41,12 +52,13 @@ export class PublishOutboxUseCase {
       groupByAggregate(batch).map((group) => this.publishGroup(group)),
     );
 
-    const result: PublishOutboxResult = { published: 0, failed: 0 };
+    const result: PublishOutboxResult = { published: 0, failed: 0, failures: [] };
     for (const outcome of outcomes) {
       // rejeição aqui é erro do banco ao registrar o resultado: sobe para o ciclo logar
       if (outcome.status === 'rejected') throw outcome.reason;
       result.published += outcome.value.published;
       result.failed += outcome.value.failed;
+      result.failures.push(...outcome.value.failures);
     }
     return result;
   }
@@ -58,15 +70,17 @@ export class PublishOutboxUseCase {
    */
   private async publishGroup(group: OutboxMessage[]): Promise<PublishOutboxResult> {
     const { outbox } = this.deps;
-    const result: PublishOutboxResult = { published: 0, failed: 0 };
+    const result: PublishOutboxResult = { published: 0, failed: 0, failures: [] };
     for (const [index, message] of group.entries()) {
       // reserva feita pelo claim; usada para não sobrescrever uma reserva de outra instância
       const claimedUntil = message.nextAttemptAt ?? message.occurredAt;
-      if (await this.publishOne(message, claimedUntil)) {
+      const failure = await this.publishOne(message, claimedUntil);
+      if (!failure) {
         result.published += 1;
         continue;
       }
       result.failed += 1;
+      result.failures.push(failure);
       const rest = group.slice(index + 1).map((m) => m.id);
       const until = message.nextAttemptAt ?? claimedUntil;
       await outbox.postpone(rest, { until, claimedUntil });
@@ -75,17 +89,27 @@ export class PublishOutboxUseCase {
     return result;
   }
 
-  private async publishOne(message: OutboxMessage, claimedUntil: Date): Promise<boolean> {
+  /** `undefined` quando publicou; senão, a falha (a mensagem já foi reagendada). */
+  private async publishOne(
+    message: OutboxMessage,
+    claimedUntil: Date,
+  ): Promise<PublishFailure | undefined> {
     const { outbox, publisher, clock, random } = this.deps;
     try {
       await publisher.publish(message);
     } catch (error) {
       message.scheduleRetry(clock.now(), random);
       await outbox.reschedule(message, { error: describeError(error), claimedUntil });
-      return false;
+      return {
+        eventId: message.id,
+        eventType: message.eventType,
+        aggregateId: message.aggregateId,
+        attempts: message.attempts,
+        error,
+      };
     }
     await outbox.markPublished(message.id, clock.now());
-    return true;
+    return undefined;
   }
 }
 

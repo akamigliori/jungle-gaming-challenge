@@ -104,7 +104,21 @@ export class PendingReferenceWorker implements OnApplicationBootstrap, BeforeApp
   private async resolveGroup(group: ClaimedPendingReference[]): Promise<void> {
     for (const item of group) {
       try {
-        await this.resolvePending.execute({ transactionId: item.id, walletId: item.walletId });
+        const result = await this.resolvePending.execute({
+          transactionId: item.id,
+          walletId: item.walletId,
+        });
+        if (result.outcome === 'skipped') continue;
+        this.logger.info(
+          {
+            transactionId: item.id,
+            walletId: item.walletId,
+            providerId: result.providerId,
+            attempts: result.attempts,
+            outcome: result.outcome,
+          },
+          'pending reference evaluated',
+        );
       } catch (error) {
         // só ids e o erro, nunca valores; a pendência volta quando o lease vencer
         this.logger.error(

@@ -31,6 +31,7 @@ function logger() {
   const errors: unknown[] = [];
   const warns: unknown[] = [];
   const log: WorkerLogger = {
+    info: (() => {}) as WorkerLogger['info'],
     error: ((obj: unknown) => errors.push(obj)) as WorkerLogger['error'],
     warn: ((obj: unknown) => warns.push(obj)) as WorkerLogger['warn'],
   };
@@ -50,7 +51,7 @@ function fakeUseCase(run: () => Promise<PublishOutboxResult>) {
 
 describe('OutboxPublisherWorker', () => {
   test('disabled -> never runs', async () => {
-    const fake = fakeUseCase(async () => ({ published: 0, failed: 0 }));
+    const fake = fakeUseCase(async () => ({ published: 0, failed: 0, failures: [] }));
     const worker = new OutboxPublisherWorker(
       fake.useCase,
       config({ OUTBOX_PUBLISHER_ENABLED: 'false' }),
@@ -77,9 +78,9 @@ describe('OutboxPublisherWorker', () => {
   test('full batch published -> next cycle right away instead of waiting the poll interval', async () => {
     let remaining = 5;
     const fake = fakeUseCase(async () => {
-      if (remaining === 0) return { published: 0, failed: 0 };
+      if (remaining === 0) return { published: 0, failed: 0, failures: [] };
       remaining -= 1;
-      return { published: 2, failed: 0 };
+      return { published: 2, failed: 0, failures: [] };
     });
     const worker = new OutboxPublisherWorker(fake.useCase, config(LONG_POLL), logger().log);
     worker.onApplicationBootstrap();
@@ -91,7 +92,7 @@ describe('OutboxPublisherWorker', () => {
   });
 
   test('full batch of failures -> waits the poll interval (no tight loop while SQS is down)', async () => {
-    const fake = fakeUseCase(async () => ({ published: 0, failed: 2 }));
+    const fake = fakeUseCase(async () => ({ published: 0, failed: 2, failures: [] }));
     const { log, warns } = logger();
     const worker = new OutboxPublisherWorker(fake.useCase, config(LONG_POLL), log);
     worker.onApplicationBootstrap();
@@ -102,6 +103,29 @@ describe('OutboxPublisherWorker', () => {
     expect(warns).toHaveLength(1);
   });
 
+  test('each failed message is logged with its ids and a safe error', async () => {
+    const failure = {
+      eventId: 'e1',
+      eventType: 'WagerTransactionProcessed',
+      aggregateId: 'w1',
+      attempts: 2,
+      error: new Error('sqs down'),
+    };
+    const fake = fakeUseCase(async () => ({ published: 0, failed: 1, failures: [failure] }));
+    const { log, warns } = logger();
+    const worker = new OutboxPublisherWorker(fake.useCase, config(LONG_POLL), log);
+    worker.onApplicationBootstrap();
+    await waitFor(() => warns.length >= 2);
+    await worker.beforeApplicationShutdown();
+    expect(warns[0]).toMatchObject({
+      eventId: 'e1',
+      eventType: 'WagerTransactionProcessed',
+      aggregateId: 'w1',
+      attempts: 2,
+      err: { type: 'Error', message: 'sqs down' },
+    });
+  });
+
   test('shutdown waits for the in-flight cycle and no cycle starts after it', async () => {
     let release: () => void = () => {};
     let finished = false;
@@ -110,7 +134,7 @@ describe('OutboxPublisherWorker', () => {
         release = resolve;
       });
       finished = true;
-      return { published: 1, failed: 0 };
+      return { published: 1, failed: 0, failures: [] };
     });
     const worker = new OutboxPublisherWorker(fake.useCase, config(), logger().log);
     worker.onApplicationBootstrap();

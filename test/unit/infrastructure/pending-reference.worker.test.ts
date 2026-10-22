@@ -26,15 +26,23 @@ function config(env: Record<string, string> = {}): AppConfig {
   return loadConfig({ PENDING_REFERENCE_POLL_INTERVAL_MS: '10', ...env });
 }
 
+const RESOLVED: ResolvePendingReferenceResult = {
+  outcome: 'resolved',
+  providerId: 'provider-a',
+  attempts: 0,
+};
+
 const clock: Clock = { now: () => new Date() };
 
 function logger() {
   const errors: unknown[] = [];
+  const infos: unknown[] = [];
   const log: WorkerLogger = {
+    info: ((obj: unknown) => infos.push(obj)) as WorkerLogger['info'],
     error: ((obj: unknown) => errors.push(obj)) as WorkerLogger['error'],
     warn: (() => {}) as WorkerLogger['warn'],
   };
-  return { log, errors };
+  return { log, errors, infos };
 }
 
 /** Repositório falso: só o claim importa para o worker. */
@@ -74,7 +82,7 @@ const once = (items: ClaimedPendingReference[]) => {
 describe('PendingReferenceWorker', () => {
   test('disabled -> never claims', async () => {
     const repo = fakeRepository(async () => []);
-    const fake = fakeUseCase(async () => 'resolved');
+    const fake = fakeUseCase(async () => RESOLVED);
     const worker = new PendingReferenceWorker(
       fake.useCase,
       repo.repo,
@@ -96,7 +104,7 @@ describe('PendingReferenceWorker', () => {
         { id: 'a2', walletId: 'wa' },
       ]),
     );
-    const fake = fakeUseCase(async () => 'resolved');
+    const fake = fakeUseCase(async () => RESOLVED);
     const worker = new PendingReferenceWorker(
       fake.useCase,
       repo.repo,
@@ -121,7 +129,7 @@ describe('PendingReferenceWorker', () => {
       events.push(`start ${transactionId}`);
       await sleep(20);
       events.push(`end ${transactionId}`);
-      return 'resolved';
+      return RESOLVED;
     });
     const worker = new PendingReferenceWorker(
       fake.useCase,
@@ -146,7 +154,7 @@ describe('PendingReferenceWorker', () => {
     );
     const fake = fakeUseCase(async ({ transactionId }) => {
       if (transactionId === 'a1') throw new Error('lock timeout');
-      return 'resolved';
+      return RESOLVED;
     });
     const { log, errors } = logger();
     const worker = new PendingReferenceWorker(fake.useCase, repo.repo, clock, config(), log);
@@ -156,13 +164,43 @@ describe('PendingReferenceWorker', () => {
     expect(errors[0]).toMatchObject({ transactionId: 'a1', walletId: 'wa' });
   });
 
+  test('each outcome is logged with the ids and the attempts', async () => {
+    const repo = fakeRepository(
+      once([
+        { id: 'a1', walletId: 'wa' },
+        { id: 'b1', walletId: 'wb' },
+        { id: 'c1', walletId: 'wc' },
+      ]),
+    );
+    const outcomes: Record<string, ResolvePendingReferenceResult> = {
+      a1: { outcome: 'resolved', providerId: 'p1', attempts: 1 },
+      b1: { outcome: 'rescheduled', providerId: 'p2', attempts: 2 },
+      c1: { outcome: 'rejected', providerId: 'p3', attempts: 5 },
+    };
+    const fake = fakeUseCase(async ({ transactionId }) => outcomes[transactionId] as never);
+    const { log, infos } = logger();
+    const worker = new PendingReferenceWorker(fake.useCase, repo.repo, clock, config(), log);
+    await worker.runOnce();
+    expect(infos).toContainEqual({
+      transactionId: 'a1',
+      walletId: 'wa',
+      providerId: 'p1',
+      attempts: 1,
+      outcome: 'resolved',
+    });
+    expect(infos).toContainEqual(
+      expect.objectContaining({ transactionId: 'c1', outcome: 'rejected', attempts: 5 }),
+    );
+    expect(infos).toHaveLength(3);
+  });
+
   test('a failing claim is logged and the loop keeps running', async () => {
     const repo = fakeRepository(async () => {
       throw new Error('db down');
     });
     const { log, errors } = logger();
     const worker = new PendingReferenceWorker(
-      fakeUseCase(async () => 'resolved').useCase,
+      fakeUseCase(async () => RESOLVED).useCase,
       repo.repo,
       clock,
       config(),
@@ -183,7 +221,7 @@ describe('PendingReferenceWorker', () => {
         release = resolve;
       });
       finished = true;
-      return 'resolved';
+      return RESOLVED;
     });
     const worker = new PendingReferenceWorker(
       fake.useCase,
