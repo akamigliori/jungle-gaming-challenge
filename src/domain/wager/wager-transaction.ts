@@ -50,6 +50,8 @@ export interface WagerTransactionState extends CreateWagerTransactionProps {
   processedAt?: Date;
   balanceAfter?: Money;
   walletVersionAfter?: number;
+  /** Quantas reavaliações reagendaram a transação (a que desiste não conta). */
+  referenceAttempts: number;
   /** Quando o worker deve tentar resolver a referência de novo (só em PENDING_REFERENCE). */
   nextReferenceAttemptAt?: Date;
 }
@@ -74,6 +76,7 @@ export class WagerTransaction {
   private _processedAt: Date | undefined;
   private _balanceAfter: Money | undefined;
   private _walletVersionAfter: number | undefined;
+  private _referenceAttempts: number;
   private _nextReferenceAttemptAt: Date | undefined;
 
   private constructor(s: WagerTransactionState) {
@@ -96,6 +99,7 @@ export class WagerTransaction {
     this._processedAt = s.processedAt;
     this._balanceAfter = s.balanceAfter;
     this._walletVersionAfter = s.walletVersionAfter;
+    this._referenceAttempts = s.referenceAttempts;
     this._nextReferenceAttemptAt = s.nextReferenceAttemptAt;
   }
 
@@ -117,7 +121,7 @@ export class WagerTransaction {
     if (p.kind === WagerTransactionKind.Bet && hasReference) {
       throw new ReferenceNotAllowedError('BET must not carry a reference');
     }
-    return new WagerTransaction({ ...p, status: S.Pending });
+    return new WagerTransaction({ ...p, status: S.Pending, referenceAttempts: 0 });
   }
 
   /** Crédito interno de abertura da carteira. O chamador calcula o hash (o domínio não tem criptografia). */
@@ -143,6 +147,7 @@ export class WagerTransaction {
       money: p.money,
       createdAt: p.at,
       status: S.Pending,
+      referenceAttempts: 0,
     });
   }
 
@@ -175,6 +180,10 @@ export class WagerTransaction {
     return this._walletVersionAfter;
   }
 
+  get referenceAttempts(): number {
+    return this._referenceAttempts;
+  }
+
   get nextReferenceAttemptAt(): Date | undefined {
     return this._nextReferenceAttemptAt;
   }
@@ -190,12 +199,22 @@ export class WagerTransaction {
     this._processedAt = p.at;
     this._balanceAfter = p.balanceAfter;
     this._walletVersionAfter = p.walletVersionAfter;
+    this._nextReferenceAttemptAt = undefined;
   }
 
   /** A referência ainda não chegou: fica pendente até `nextAttemptAt`. */
   markPendingReference(p: { nextAttemptAt: Date }): void {
     this.transitionTo(S.PendingReference);
     this._nextReferenceAttemptAt = p.nextAttemptAt;
+  }
+
+  /** A referência continua ausente: conta a tentativa e reagenda, sem mudar de estado. */
+  retryReferenceLater(nextAttemptAt: Date): void {
+    if (this._status !== S.PendingReference) {
+      throw new InvalidTransactionStateError(`cannot retry reference from ${this._status}`);
+    }
+    this._referenceAttempts += 1;
+    this._nextReferenceAttemptAt = nextAttemptAt;
   }
 
   reject(
@@ -208,6 +227,7 @@ export class WagerTransaction {
     this._processedAt = at;
     this._balanceAfter = observed?.balanceAfter;
     this._walletVersionAfter = observed?.walletVersionAfter;
+    this._nextReferenceAttemptAt = undefined;
   }
 
   fail(code: FailureCode, at: Date): void {

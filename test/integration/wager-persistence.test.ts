@@ -13,6 +13,7 @@ import { InvariantViolationError } from '../../src/domain/shared/domain-error';
 import { Money } from '../../src/domain/shared/money';
 import { WagerTransaction } from '../../src/domain/wager/wager-transaction';
 import { WagerTransactionKind } from '../../src/domain/wager/wager-transaction-kind';
+import { WagerTransactionStatus } from '../../src/domain/wager/wager-transaction-status';
 import { Wallet } from '../../src/domain/wallet/wallet';
 import { isTransientDbError } from '../../src/infrastructure/persistence/pg-errors';
 import { createTestApp, type TestApp } from './support/app';
@@ -273,5 +274,212 @@ describe('WagerTransactionRepository lookups', () => {
     expect(found?.nextReferenceAttemptAt?.getTime()).toBe(nextAttemptAt.getTime());
     expect(found?.balanceAfter).toBeUndefined();
     expect(found?.referenceExternalTransactionId).toBe('missing');
+  });
+});
+
+describe('WagerTransactionRepository pending references', () => {
+  const inMinutes = (minutes: number) => new Date(Date.now() + minutes * 60_000);
+
+  async function addPendingRefund(
+    wallet: Wallet,
+    p: { external: string; reference: string; providerId?: string; nextAttemptAt?: Date },
+  ): Promise<WagerTransaction> {
+    const providerId = p.providerId ?? 'provider-a';
+    const refund = newTransaction(wallet, {
+      providerId,
+      externalTransactionId: p.external,
+      idempotencyKey: `${providerId}:${p.external}`,
+      kind: WagerTransactionKind.Refund,
+      referenceExternalTransactionId: p.reference,
+    });
+    refund.markPendingReference({ nextAttemptAt: p.nextAttemptAt ?? inMinutes(10) });
+    await transactions.add(refund);
+    return refund;
+  }
+
+  async function nextAttemptOf(id: string): Promise<Date> {
+    const [row] = await orm.em
+      .getConnection()
+      .execute<{ next_attempt: string }[]>(
+        'SELECT next_reference_attempt_at AS next_attempt FROM wager_transactions WHERE id = ?',
+        [id],
+      );
+    return new Date(row?.next_attempt ?? 0);
+  }
+
+  test('findById rehydrates the transaction, including referenceAttempts', async () => {
+    const wallet = await createWallet();
+    const refund = await addPendingRefund(wallet, { external: 'refund-1', reference: 'bet-1' });
+    const found = await runner.run(() => transactions.findById(refund.id));
+    expect(found?.id).toBe(refund.id);
+    expect(found?.referenceAttempts).toBe(0);
+    expect(await runner.run(() => transactions.findById(Bun.randomUUIDv7()))).toBeNull();
+  });
+
+  test('update persists a reschedule (attempts and next attempt)', async () => {
+    const wallet = await createWallet();
+    const refund = await addPendingRefund(wallet, { external: 'refund-1', reference: 'bet-1' });
+    const nextAttemptAt = inMinutes(5);
+    refund.retryReferenceLater(nextAttemptAt);
+    await runner.run(() => transactions.update(refund, new Date()));
+
+    const found = await runner.run(() => transactions.findById(refund.id));
+    expect(found?.status).toBe(WagerTransactionStatus.PendingReference);
+    expect(found?.referenceAttempts).toBe(1);
+    expect(found?.nextReferenceAttemptAt?.getTime()).toBe(nextAttemptAt.getTime());
+  });
+
+  test('update stamps updated_at with the time it receives (the decision clock)', async () => {
+    const wallet = await createWallet();
+    const refund = await addPendingRefund(wallet, { external: 'refund-1', reference: 'bet-1' });
+    const at = new Date('2030-01-02T03:04:05.000Z');
+    refund.retryReferenceLater(inMinutes(5));
+    await runner.run(() => transactions.update(refund, at));
+
+    const [row] = await orm.em
+      .getConnection()
+      .execute<{ updated_at: string }[]>('SELECT updated_at FROM wager_transactions WHERE id = ?', [
+        refund.id,
+      ]);
+    expect(new Date(row?.updated_at ?? 0).getTime()).toBe(at.getTime());
+  });
+
+  test('update persists the terminal fields when a pending transaction resolves', async () => {
+    const wallet = await createWallet();
+    const bet = newTransaction(wallet, { externalTransactionId: 'bet-1' });
+    bet.markProcessed({ at: new Date(), balanceAfter: money('75.00'), walletVersionAfter: 2 });
+    await transactions.add(bet);
+    const refund = await addPendingRefund(wallet, { external: 'refund-1', reference: 'bet-1' });
+    refund.reject('REFERENCE_NOT_FOUND', new Date());
+    await runner.run(() => transactions.update(refund, new Date()));
+
+    const found = await runner.run(() => transactions.findById(refund.id));
+    expect(found?.status).toBe(WagerTransactionStatus.Rejected);
+    expect(found?.failureCode).toBe('REFERENCE_NOT_FOUND');
+    expect(found?.processedAt).toBeInstanceOf(Date);
+    expect(found?.nextReferenceAttemptAt).toBeUndefined();
+  });
+
+  test('update of a row that is no longer pending throws InvariantViolationError', async () => {
+    const wallet = await createWallet();
+    const refund = await addPendingRefund(wallet, { external: 'refund-1', reference: 'bet-1' });
+    const stale = await runner.run(() => transactions.findById(refund.id));
+    refund.reject('REFERENCE_NOT_FOUND', new Date());
+    await runner.run(() => transactions.update(refund, new Date()));
+
+    if (!stale) throw new Error('transaction not found');
+    stale.retryReferenceLater(inMinutes(5));
+    await expect(runner.run(() => transactions.update(stale, new Date()))).rejects.toBeInstanceOf(
+      InvariantViolationError,
+    );
+  });
+
+  test('wakeDependents only touches pending rows of that wallet/provider/reference', async () => {
+    const wallet = await createWallet();
+    const now = new Date();
+    const later = inMinutes(10);
+    const pending = { reference: 'bet-1', nextAttemptAt: later };
+    const dependent = await addPendingRefund(wallet, { ...pending, external: 'r-1' });
+    const otherReference = await addPendingRefund(wallet, {
+      ...pending,
+      external: 'r-2',
+      reference: 'bet-2',
+    });
+    const otherProvider = await addPendingRefund(wallet, {
+      ...pending,
+      external: 'r-3',
+      providerId: 'provider-b',
+    });
+    const alreadyDue = inMinutes(-1);
+    const due = await addPendingRefund(wallet, {
+      external: 'r-4',
+      reference: 'bet-1',
+      nextAttemptAt: alreadyDue,
+    });
+
+    await runner.run(() =>
+      transactions.wakeDependents({
+        walletId: wallet.id,
+        providerId: 'provider-a',
+        externalTransactionId: 'bet-1',
+        now,
+      }),
+    );
+
+    expect((await nextAttemptOf(dependent.id)).getTime()).toBe(now.getTime());
+    expect((await nextAttemptOf(otherReference.id)).getTime()).toBe(later.getTime());
+    expect((await nextAttemptOf(otherProvider.id)).getTime()).toBe(later.getTime());
+    // já vencida: o filtro `> now` não reescreve
+    expect((await nextAttemptOf(due.id)).getTime()).toBe(alreadyDue.getTime());
+  });
+
+  test('wakeDependents ignores pending rows of another wallet', async () => {
+    const wallet = await createWallet();
+    const other = await t.app.get(CreateWalletUseCase).execute({
+      playerId: '0192f28f-5dc0-7d58-bdb2-814ad6a0f4b9',
+      initialBalance: { amount: '100.00', currency: CURRENCY },
+      correlationId: 'wager-persistence-test',
+    });
+    const later = inMinutes(10);
+    const foreign = await addPendingRefund(other, {
+      external: 'r-1',
+      reference: 'bet-1',
+      nextAttemptAt: later,
+    });
+
+    await runner.run(() =>
+      transactions.wakeDependents({
+        walletId: wallet.id,
+        providerId: 'provider-a',
+        externalTransactionId: 'bet-1',
+        now: new Date(),
+      }),
+    );
+
+    expect((await nextAttemptOf(foreign.id)).getTime()).toBe(later.getTime());
+  });
+
+  test('claimDuePendingReferences returns due rows once and pushes them by the lease', async () => {
+    const wallet = await createWallet();
+    const now = new Date();
+    const first = await addPendingRefund(wallet, {
+      external: 'r-1',
+      reference: 'bet-1',
+      nextAttemptAt: new Date(now.getTime() - 2_000),
+    });
+    const second = await addPendingRefund(wallet, {
+      external: 'r-2',
+      reference: 'bet-2',
+      nextAttemptAt: new Date(now.getTime() - 1_000),
+    });
+    await addPendingRefund(wallet, { external: 'r-3', reference: 'bet-3' });
+
+    const claimed = await transactions.claimDuePendingReferences({
+      now,
+      limit: 10,
+      leaseMs: 30_000,
+    });
+
+    expect(claimed).toEqual([
+      { id: first.id, walletId: wallet.id },
+      { id: second.id, walletId: wallet.id },
+    ]);
+    expect((await nextAttemptOf(first.id)).getTime()).toBe(now.getTime() + 30_000);
+    expect(
+      await transactions.claimDuePendingReferences({ now, limit: 10, leaseMs: 30_000 }),
+    ).toEqual([]);
+  });
+
+  test('claimDuePendingReferences respects the limit', async () => {
+    const wallet = await createWallet();
+    const past = inMinutes(-1);
+    await addPendingRefund(wallet, { external: 'r-1', reference: 'bet-1', nextAttemptAt: past });
+    await addPendingRefund(wallet, { external: 'r-2', reference: 'bet-2', nextAttemptAt: past });
+    const claimed = await transactions.claimDuePendingReferences({
+      now: new Date(),
+      limit: 1,
+      leaseMs: 30_000,
+    });
+    expect(claimed).toHaveLength(1);
   });
 });

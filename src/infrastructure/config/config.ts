@@ -1,4 +1,8 @@
 import { z } from 'zod';
+import {
+  DEFAULT_REFERENCE_RETRY,
+  type ReferenceRetryPolicy,
+} from '../../domain/wager/reference-retry';
 
 export type Env = Record<string, string | undefined>;
 
@@ -33,8 +37,20 @@ export interface AppConfig {
     /** Prazo para as mensagens em andamento terminarem no shutdown. */
     shutdownTimeoutMs: number;
   };
+  pendingReference: {
+    enabled: boolean;
+    pollIntervalMs: number;
+    batchSize: number;
+    /** Por quanto tempo o claim de um lote impede outra instância de pegá-lo. */
+    leaseMs: number;
+    retry: ReferenceRetryPolicy;
+  };
   logLevel: string;
 }
+
+/** Tamanho do lote e lease do worker de pendências (mesmos valores da outbox). */
+const PENDING_REFERENCE_BATCH_SIZE = 50;
+const PENDING_REFERENCE_LEASE_MS = 30_000;
 
 /** Folga do timeout HTTP do long poll sobre o `WaitTimeSeconds`. */
 export const LONG_POLL_TIMEOUT_MARGIN_MS = 5000;
@@ -66,6 +82,19 @@ const fieldsSchema = z.object({
   SQS_RECEIVE_BATCH_SIZE: z.coerce.number().int().positive().max(10).default(4),
   SQS_WAIT_TIME_SECONDS: z.coerce.number().int().min(0).max(20).default(10),
   SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(20_000),
+  PENDING_REFERENCE_WORKER_ENABLED: z.stringbool().default(true),
+  PENDING_REFERENCE_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(1000),
+  REFERENCE_MAX_ATTEMPTS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(DEFAULT_REFERENCE_RETRY.maxAttempts),
+  REFERENCE_RETRY_BASE_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(DEFAULT_REFERENCE_RETRY.baseMs),
+  REFERENCE_RETRY_MAX_MS: z.coerce.number().int().positive().default(DEFAULT_REFERENCE_RETRY.maxMs),
 });
 
 // o shutdown espera o long poll em andamento terminar: o prazo tem de cobri-lo
@@ -76,6 +105,13 @@ const envSchema = fieldsSchema.superRefine((e, ctx) => {
       code: 'custom',
       path: ['SHUTDOWN_TIMEOUT_MS'],
       message: `must be >= SQS_WAIT_TIME_SECONDS * 1000 + ${LONG_POLL_TIMEOUT_MARGIN_MS} (${longPollMs})`,
+    });
+  }
+  if (e.REFERENCE_RETRY_MAX_MS < e.REFERENCE_RETRY_BASE_MS) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['REFERENCE_RETRY_MAX_MS'],
+      message: 'must be >= REFERENCE_RETRY_BASE_MS',
     });
   }
 });
@@ -115,6 +151,17 @@ export function loadConfig(env: Env = process.env): AppConfig {
       batchSize: e.SQS_RECEIVE_BATCH_SIZE,
       waitTimeSeconds: e.SQS_WAIT_TIME_SECONDS,
       shutdownTimeoutMs: e.SHUTDOWN_TIMEOUT_MS,
+    },
+    pendingReference: {
+      enabled: e.PENDING_REFERENCE_WORKER_ENABLED,
+      pollIntervalMs: e.PENDING_REFERENCE_POLL_INTERVAL_MS,
+      batchSize: PENDING_REFERENCE_BATCH_SIZE,
+      leaseMs: PENDING_REFERENCE_LEASE_MS,
+      retry: {
+        baseMs: e.REFERENCE_RETRY_BASE_MS,
+        maxMs: e.REFERENCE_RETRY_MAX_MS,
+        maxAttempts: e.REFERENCE_MAX_ATTEMPTS,
+      },
     },
     logLevel: e.LOG_LEVEL,
   };

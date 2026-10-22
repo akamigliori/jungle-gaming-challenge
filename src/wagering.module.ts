@@ -11,8 +11,11 @@ import {
 } from './application/ports/wager-transaction.repository';
 import { WALLET_REPOSITORY, type WalletRepository } from './application/ports/wallet.repository';
 import { ProcessWagerTransactionUseCase } from './application/wager/process-wager-transaction.use-case';
+import { ResolvePendingReferenceUseCase } from './application/wager/resolve-pending-reference.use-case';
+import { APP_CONFIG, type AppConfig } from './infrastructure/config/config';
 import { isTransientDbError, isWagerUniqueViolation } from './infrastructure/persistence/pg-errors';
 import { WagerTransactionQuery } from './infrastructure/persistence/queries/wager-transaction.query';
+import { PendingReferenceWorker } from './infrastructure/workers/pending-reference.worker';
 import { WageringController } from './interfaces/http/wagering/wagering.controller';
 import { WagerTransactionsConsumer } from './interfaces/sqs/wager-transactions.consumer';
 
@@ -20,7 +23,8 @@ import { WagerTransactionsConsumer } from './interfaces/sqs/wager-transactions.c
  * Transações de aposta: o caso de uso é montado por factory para que a camada de aplicação
  * continue sem decorators do Nest; a classificação dos erros do Postgres entra como funções,
  * sem a aplicação importar a infraestrutura. HTTP (controller) e SQS (consumer) chamam o mesmo caso
- * de uso, que também é exportado para outros pontos de entrada.
+ * de uso, que também é exportado para outros pontos de entrada. As referências pendentes são
+ * reavaliadas por um worker com o seu próprio caso de uso, sobre os mesmos repositórios.
  */
 @Module({
   controllers: [WageringController],
@@ -37,6 +41,7 @@ import { WagerTransactionsConsumer } from './interfaces/sqs/wager-transactions.c
         OUTBOX_REPOSITORY,
         ID_GENERATOR,
         CLOCK,
+        APP_CONFIG,
       ],
       useFactory: (
         transactionRunner: TransactionRunner,
@@ -47,6 +52,7 @@ import { WagerTransactionsConsumer } from './interfaces/sqs/wager-transactions.c
         outbox: OutboxRepository,
         ids: IdGenerator,
         clock: Clock,
+        config: AppConfig,
       ) =>
         new ProcessWagerTransactionUseCase({
           transactionRunner,
@@ -59,9 +65,45 @@ import { WagerTransactionsConsumer } from './interfaces/sqs/wager-transactions.c
           clock,
           isTransient: isTransientDbError,
           isUniqueViolation: isWagerUniqueViolation,
+          referenceRetry: config.pendingReference.retry,
+        }),
+    },
+    {
+      provide: ResolvePendingReferenceUseCase,
+      inject: [
+        TRANSACTION_RUNNER,
+        WALLET_REPOSITORY,
+        WAGER_TRANSACTION_REPOSITORY,
+        LEDGER_REPOSITORY,
+        OUTBOX_REPOSITORY,
+        ID_GENERATOR,
+        CLOCK,
+        APP_CONFIG,
+      ],
+      useFactory: (
+        transactionRunner: TransactionRunner,
+        wallets: WalletRepository,
+        transactions: WagerTransactionRepository,
+        ledger: LedgerRepository,
+        outbox: OutboxRepository,
+        ids: IdGenerator,
+        clock: Clock,
+        config: AppConfig,
+      ) =>
+        new ResolvePendingReferenceUseCase({
+          transactionRunner,
+          wallets,
+          transactions,
+          ledger,
+          outbox,
+          ids,
+          clock,
+          isTransient: isTransientDbError,
+          referenceRetry: config.pendingReference.retry,
         }),
     },
     WagerTransactionsConsumer,
+    PendingReferenceWorker,
   ],
   exports: [ProcessWagerTransactionUseCase],
 })
