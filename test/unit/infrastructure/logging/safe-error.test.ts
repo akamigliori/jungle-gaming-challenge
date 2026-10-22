@@ -3,7 +3,7 @@ import { safeError } from '../../../../src/infrastructure/logging/safe-error';
 
 describe('safeError', () => {
   test('omits message and stack of driver errors that carry interpolated values', () => {
-    const driverError = Object.assign(new Error('insert into t values (12345.67)'), {
+    const driverError = Object.assign(new Error('INSERT INTO t VALUES (12345.67)'), {
       code: '23505',
       constraint: 'uq_x',
       table: 't',

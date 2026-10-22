@@ -16,6 +16,7 @@ import type { Wallet } from '../../src/domain/wallet/wallet';
 import { APP_CONFIG, type AppConfig } from '../../src/infrastructure/config/config';
 import { MikroOrmWalletRepository } from '../../src/infrastructure/persistence/repositories/mikro-orm-wallet.repository';
 import { createSqsClient, SQS_CLIENT } from '../../src/infrastructure/sqs/sqs.client';
+import { UNEXPECTED_ERROR_MAX_RECEIVES } from '../../src/interfaces/sqs/message-failure-policy';
 import { CONSUMER_NAME } from '../../src/interfaces/sqs/wager-transactions.consumer';
 import { createTestApp, type OverrideProviders, type TestApp } from './support/app';
 import { resetDb, withTestDb } from './support/db';
@@ -476,7 +477,7 @@ describe('SQS consumer — order, retries, crash and shutdown', () => {
     expect(failureCodeOf(dead)).toBe('INTERNAL_ERROR');
     expect(dead?.Body).toBe(JSON.stringify(message));
     await waitQueueEmpty(q);
-    expect(deliveries).toBe(MAX_RECEIVE_COUNT);
+    expect(deliveries).toBe(UNEXPECTED_ERROR_MAX_RECEIVES);
     expect(await transactionsOf(data.externalTransactionId)).toEqual([]);
     expect(await inboxRows(message.messageId)).toBe(0);
     expect(await balanceOf(walletId)).toBe('100.00');
