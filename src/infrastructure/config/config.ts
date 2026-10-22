@@ -57,7 +57,7 @@ const MS_PER_SECOND = 1000;
 
 const fieldsSchema = z.object({
   DB_HOST: z.string().min(1).default('localhost'),
-  DB_PORT: z.coerce.number().int().positive().default(5433),
+  DB_PORT: z.coerce.number().int().positive().default(5432),
   DB_USER: z.string().min(1).default('wagering'),
   DB_PASSWORD: z.string().min(1).default('wagering'),
   DB_NAME: z.string().min(1).default('wagering'),

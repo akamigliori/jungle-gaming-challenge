@@ -823,7 +823,7 @@ aparece). Formato: decisão, alternativas consideradas e motivo.
 | Decisão | Alternativas | Motivo |
 |---|---|---|
 | `postgres:17-alpine` e `localstack/localstack:4.4.0` (só SQS), versões fixas, com `mem_limit` | imagens `latest` (as recentes do LocalStack exigem token); MiniStack | reprodutibilidade e gratuidade numa máquina com pouca memória |
-| Postgres publicado na porta 5433 do host | 5432 | não conflitar com um Postgres local |
+| Postgres publicado na porta padrão 5432 do host, trocável por `POSTGRES_HOST_PORT` e `DB_PORT` | porta alternativa fixa | quem avalia espera o padrão; quem já tem um Postgres local muda as duas variáveis no `.env` |
 | Filas criadas por script de init do LocalStack, FIFO com `ContentBasedDeduplication=false`; a principal com redrive para a DLQ | criar filas no código da aplicação | infraestrutura declarada fora da aplicação e deduplicação sempre explícita |
 | Healthcheck do LocalStack consulta `/_localstack/init/ready` e exige `completed: true` | `"sqs": "running"` em `/_localstack/health` | o SQS fica "running" antes de o script criar as filas; `up --wait` liberava testes e app com filas inexistentes |
 | Eventos da outbox numa terceira fila, `wagering-events.fifo` (grupo = `aggregateId`, deduplicação = `eventId`) | publicar na fila de entrada | o enunciado não define o destino; misturar eventos com comandos confundiria os consumidores |
