@@ -256,8 +256,8 @@ não gera evento. A cadeia anda sozinha: a `BET` acorda o `WIN`, o `WIN` process
 
 **Claim com lease.** Cada ciclo reserva até 50 pendências vencidas numa transação curta
 (`SELECT ... FOR UPDATE SKIP LOCKED`, mais antigas primeiro) e, no mesmo `COMMIT`, empurra o
-`next_reference_attempt_at` delas para daqui a 30 s. Duas instâncias nunca pegam a mesma linha no
-mesmo ciclo; se a instância morrer, as linhas voltam quando o lease vence. O lease não toca em
+`next_reference_attempt_at` delas pelo lease (`PENDING_REFERENCE_LEASE_MS`, 30 s por padrão).
+Duas instâncias nunca pegam a mesma linha no mesmo ciclo; se a instância morrer, as linhas voltam quando o lease vence. O lease não toca em
 `updated_at` (é coordenação entre instâncias, não mudança de negócio). O lote é agrupado por
 wallet: dentro da wallet, um item por vez, na ordem do claim; no máximo 2 wallets ao mesmo tempo
 (seção 9). Um item que falha é logado (só ids) e espera o lease; os demais seguem. Mesmo que duas
@@ -570,7 +570,12 @@ Como o desligamento espera o long poll em andamento, `SHUTDOWN_TIMEOUT_MS` preci
 `SQS_WAIT_TIME_SECONDS` + 5 s (a folga do timeout HTTP do long poll); a configuração recusa um
 valor menor na inicialização.
 
-O `main.ts` arma, no `SIGTERM`/`SIGINT`, um timer de saída forçada de `SHUTDOWN_TIMEOUT_MS` + 5 s
+O `main.ts` trata o `SIGTERM`/`SIGINT` por conta própria: chama `app.close()` (que roda os mesmos
+hooks de desligamento do Nest) e sai com código 0. O `enableShutdownHooks` do Nest não é usado:
+no padrão ele reenvia o sinal ao terminar, e o processo sairia com 143 mesmo num desligamento
+limpo (um orquestrador leria isso como falha); a opção `useProcessExit` dele sai com 0, mas não
+arma o timer de saída forçada descrito a seguir, então um só handler faz as duas coisas. Um
+segundo sinal durante o desligamento é ignorado (não inicia outro `close`). O mesmo handler arma um timer de saída forçada de `SHUTDOWN_TIMEOUT_MS` + 5 s
 (`process.exit(1)`), para que um hook travado nunca deixe o processo pendurado. Com os valores
 padrão, o total fica abaixo dos 30 s que um orquestrador costuma esperar antes do `SIGKILL`; em
 geral, o prazo do orquestrador precisa ser maior que `SHUTDOWN_TIMEOUT_MS` + 5 s. Num `SIGKILL`
@@ -608,7 +613,63 @@ efeito); shutdown no meio de uma mensagem (ela termina e é confirmada; a não i
 grupo volta visível na hora e é processada por uma instância nova); e mensagem recebida pelo long
 poll durante o desligamento (volta visível sem ser processada e uma instância nova a processa).
 
-## 13. Autenticação
+## 13. Múltiplas instâncias
+
+Nenhum estado que importa para a correção fica na memória de um processo: saldo, idempotência,
+inbox, pendências e outbox estão no Postgres, e a fila é o SQS. Por isso N instâncias iguais
+dividem o trabalho sem coordenação extra:
+
+| Peça | O que impede duas instâncias de pisarem uma na outra |
+|---|---|
+| HTTP e consumer | lock da linha da wallet (`SELECT … FOR UPDATE`) e `UNIQUE` de idempotência e de inbox |
+| Consumer | o SQS FIFO não entrega o mesmo grupo (wallet) a dois receptores ao mesmo tempo |
+| Publisher da outbox | claim com `FOR UPDATE SKIP LOCKED` + lease; reenvio deduplicado pelo `eventId` |
+| Worker de pendências | o mesmo claim com lease, e o lock da wallet na reavaliação |
+
+**Docker Compose.** O profile `app` sobe `app-1`, `app-2` e `app-3` (portas 3001–3003) a partir da
+mesma imagem, depois do serviço `migrate`. São serviços nomeados, e não `replicas`, para que dê para
+derrubar uma instância específica (`docker compose kill -s SIGKILL app-2`). Pool: 3 × 10 conexões
+cabem no `max_connections` (100) do Postgres.
+
+**Como é testado** (`test/multi-instance/multi-instance.test.ts`, `bun run test:multi-instance`,
+último passo da CI). Três processos reais (`bun src/main.ts`, sem Docker, para rodar igual na CI)
+contra o Postgres e o LocalStack do Compose, com filas próprias (visibility 5 s, `maxReceiveCount`
+10), leases curtos (3 s na outbox e nas pendências) e consumer, publisher e worker ligados em
+todos. O roteiro (`test/multi-instance/scenario.ts`) é
+determinístico: 10 wallets, 13 rodadas por wallet (`BET`+`WIN`, `BET`+`LOSS`, `REFUND` antes da
+`BET`, `BET`+`ROLLBACK`, `BET`+`WIN`+`ROLLBACK` do `WIN`), uma reentrega do mesmo `messageId` e a
+mesma operação em duas mensagens por wallet, e uma mensagem venenosa — 307 mensagens enviadas,
+296 `messageId` válidos distintos. Em paralelo, a mesma `BET` vai 50 vezes por HTTP, espalhada
+pelas três instâncias.
+
+Durante o processamento, quando ⅓ das mensagens já está na inbox, a instância 2 leva `SIGKILL` e é
+reiniciada; com ⅔, a instância 3 leva `SIGTERM`, tem de sair com código 0 em menos de 30 s, e é
+reiniciada. O teste espera a fila principal esvaziar, nenhuma `PENDING_REFERENCE` e nenhuma outbox
+pendente, e confere: invariante do ledger (com a cadeia de saldos); saldo de cada wallet igual ao
+calculado pelo roteiro com `Money`; nenhuma chave de idempotência repetida e todas as operações
+`PROCESSED`; uma linha de inbox por `messageId` válido; a DLQ com exatamente a mensagem venenosa; a
+`BET` repetida com um único lançamento; e todo evento da outbox presente na fila de eventos (o
+publisher roda nos processos mortos, então pode cobrir "morreu entre publicar e marcar").
+
+O `SIGKILL` e o `SIGTERM` são disparados pela contagem global da inbox, não por uma mensagem
+específica: o teste não garante qual mensagem estava em voo no momento. As provas determinísticas
+desses casos são os testes de integração do consumer (morte depois do `COMMIT` e antes do ack;
+desligamento com mensagem em andamento), descritos na seção 12.
+
+**Números medidos** (máquina de desenvolvimento, 8 GB de RAM, três execuções seguidas): os 296
+`messageId` + 50 requisições HTTP drenados em 9,1 s a 9,5 s (32,5 a 31,2 mensagens/s); o `SIGTERM`
+terminou em 0,1 s a 0,3 s. O tempo é dominado pela recuperação das falhas, não pelo processamento:
+a mensagem em voo na instância morta só volta depois do visibility timeout (5 s no teste, segurando
+o grupo da wallet), e uma pendência reservada pelo worker da instância morta só volta quando o
+lease vence (3 s no teste; com o padrão de 30 s, uma execução levou 33 s). Não é um teste de
+carga: a vazão sem falhas não foi medida.
+
+**Worker de pendências no desligamento.** O worker termina o lote reservado inteiro (até 50 itens,
+cada um uma transação curta) antes de sair. Parar no meio deixaria o resto reservado até o lease
+vencer (30 s de atraso para essas pendências, com o padrão), e o lote inteiro cabe com folga no prazo: no teste,
+o `SIGTERM` termina em menos de 1 s.
+
+## 14. Autenticação
 
 Hoje não há autenticação: o `AuthGuard` global é um no-op que libera todas as requisições. Ele é o
 ponto de extensão explícito para integrar um IdP externo, junto com o contrato
@@ -626,7 +687,7 @@ Os endpoints de health (`/health/live`, `/health/ready`) são marcados com `@Pub
 abertos. Mensagens da fila são tratadas como canal interno confiável, mas a identidade do provedor
 na mensagem passa pelas mesmas validações de domínio.
 
-## 14. Observabilidade e health checks
+## 15. Observabilidade e health checks
 
 - Logs JSON (pino) com uma linha por requisição. O header `x-correlation-id` é aceito (se for um
   valor curto e seguro) ou gerado como UUIDv7, devolvido na resposta e incluído como
@@ -637,14 +698,14 @@ na mensagem passa pelas mesmas validações de domínio.
   verificação com timeout de 2 s; `503` indicando qual dependência está `down`. O cliente SQS não
   faz retry interno e tem timeout de conexão e de requisição, para não travar a verificação.
 
-## 15. Limitações conhecidas
+## 16. Limitações conhecidas
 
 - `TRUNCATE` não dispara os triggers de linha que tornam o ledger append-only. Ele é usado apenas
   nos testes para limpar o banco; em produção o usuário da aplicação não deve ter permissão de
   `TRUNCATE`.
-- Autenticação ainda não implementada (ver seção 13).
+- Autenticação ainda não implementada (ver seção 14).
 - Uma pendência cuja reavaliação falha sempre com um erro não transitório (um bug) é tentada de
-  novo a cada lease (30 s) e logada a cada vez; `reference_attempts` não cresce, então ela não
+  novo a cada lease (`PENDING_REFERENCE_LEASE_MS`, 30 s por padrão) e logada a cada vez; `reference_attempts` não cresce, então ela não
   chega à rejeição sozinha.
 - O lease do worker de referências pendentes também usa o relógio da instância. Um desvio de
   relógio só faz duas instâncias reavaliarem a mesma pendência, o que o lock da wallet e a releitura
@@ -683,7 +744,7 @@ na mensagem passa pelas mesmas validações de domínio.
   longo (um índice numa tabela grande, por exemplo) seria cancelada; ela precisa de
   `SET LOCAL statement_timeout = 0` no início, ou o script de migração precisa usar outro valor.
 
-## 16. Próximos passos
+## 17. Próximos passos
 
 - **Métrica de outbox lag** (idade do evento pendente mais antigo) e de falhas de publicação, para
   alertar quando o SQS estiver fora ou um evento travar em retry.

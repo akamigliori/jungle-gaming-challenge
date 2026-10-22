@@ -48,9 +48,8 @@ export interface AppConfig {
   logLevel: string;
 }
 
-/** Tamanho do lote e lease do worker de pendências (mesmos valores da outbox). */
+/** Tamanho do lote do worker de pendências (o mesmo da outbox). */
 const PENDING_REFERENCE_BATCH_SIZE = 50;
-const PENDING_REFERENCE_LEASE_MS = 30_000;
 
 /** Folga do timeout HTTP do long poll sobre o `WaitTimeSeconds`. */
 export const LONG_POLL_TIMEOUT_MARGIN_MS = 5000;
@@ -84,6 +83,7 @@ const fieldsSchema = z.object({
   SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(20_000),
   PENDING_REFERENCE_WORKER_ENABLED: z.stringbool().default(true),
   PENDING_REFERENCE_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(1000),
+  PENDING_REFERENCE_LEASE_MS: z.coerce.number().int().positive().default(30_000),
   REFERENCE_MAX_ATTEMPTS: z.coerce
     .number()
     .int()
@@ -156,7 +156,7 @@ export function loadConfig(env: Env = process.env): AppConfig {
       enabled: e.PENDING_REFERENCE_WORKER_ENABLED,
       pollIntervalMs: e.PENDING_REFERENCE_POLL_INTERVAL_MS,
       batchSize: PENDING_REFERENCE_BATCH_SIZE,
-      leaseMs: PENDING_REFERENCE_LEASE_MS,
+      leaseMs: e.PENDING_REFERENCE_LEASE_MS,
       retry: {
         baseMs: e.REFERENCE_RETRY_BASE_MS,
         maxMs: e.REFERENCE_RETRY_MAX_MS,
