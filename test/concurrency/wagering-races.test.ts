@@ -107,6 +107,28 @@ async function ledgerCount(walletId: string, direction: 'CREDIT' | 'DEBIT'): Pro
 
 const statusesOf = (responses: SubmitResponse[]) => responses.map((r) => r.status).sort();
 
+/** Tipos de evento gravados na outbox para uma transação, em ordem alfabética. */
+async function eventTypesOf(walletId: string, transactionId: string): Promise<string[]> {
+  const rows = await sql<{ event_type: string }>(
+    `SELECT event_type FROM outbox_messages
+      WHERE aggregate_id = ? AND payload -> 'data' ->> 'transactionId' = ?
+      ORDER BY event_type`,
+    [walletId, transactionId],
+  );
+  return rows.map((r) => r.event_type);
+}
+
+/** Total de eventos na outbox da wallet (inclui os dois eventos da abertura). */
+async function outboxCount(walletId: string): Promise<number> {
+  const [row] = await sql<{ n: number }>(
+    'SELECT COUNT(*)::INT AS n FROM outbox_messages WHERE aggregate_id = ?',
+    [walletId],
+  );
+  return row?.n ?? 0;
+}
+
+const PROCESSED_EVENTS = ['WagerTransactionProcessed', 'WalletBalanceChanged'];
+
 beforeAll(async () => {
   orm = await withTestDb();
   t = await createTestApp();
@@ -140,11 +162,34 @@ describe('balance race (same wallet)', () => {
       const responses = await inParallel([bet(`bet-${round}-a`), bet(`bet-${round}-b`)]);
 
       expect(statusesOf(responses)).toEqual([201, 422]);
+      const accepted = responses.find((r) => r.status === 201);
       const rejected = responses.find((r) => r.status === 422);
+      expect(accepted?.body.status).toBe('PROCESSED');
       expect(rejected?.body.status).toBe('REJECTED');
       expect(rejected?.body.error?.code).toBe('INSUFFICIENT_FUNDS');
       expect(await balanceOf(wallet.id)).toBe('20.00');
       expect(await ledgerCount(wallet.id, 'DEBIT')).toBe(1);
+
+      // no banco: uma aposta processada e uma rejeitada (a abertura fica de fora)
+      const stored = await sql<{ status: string; failure_code: string | null }>(
+        `SELECT status, failure_code FROM wager_transactions
+          WHERE wallet_id = ? AND kind <> 'OPENING'
+          ORDER BY status`,
+        [wallet.id],
+      );
+      expect(stored).toEqual([
+        { status: 'PROCESSED', failure_code: null },
+        { status: 'REJECTED', failure_code: 'INSUFFICIENT_FUNDS' },
+      ]);
+
+      // outbox: 2 eventos da abertura + 2 da aposta processada + 1 da rejeitada
+      expect(await eventTypesOf(wallet.id, accepted?.body.transactionId ?? '')).toEqual(
+        PROCESSED_EVENTS,
+      );
+      expect(await eventTypesOf(wallet.id, rejected?.body.transactionId ?? '')).toEqual([
+        'WagerTransactionRejected',
+      ]);
+      expect(await outboxCount(wallet.id)).toBe(5);
     }
   });
 });
@@ -177,6 +222,12 @@ describe('idempotency under concurrency', () => {
     expect(rows?.n).toBe(1);
     expect(await ledgerCount(wallet.id, 'DEBIT')).toBe(1);
     expect(await balanceOf(wallet.id)).toBe('75.00');
+
+    // outbox: os replays não geram evento; só os 2 da abertura + 2 da aposta original
+    expect(await eventTypesOf(wallet.id, responses[0]?.body.transactionId ?? '')).toEqual(
+      PROCESSED_EVENTS,
+    );
+    expect(await outboxCount(wallet.id)).toBe(4);
   });
 
   test('same key on 2 different wallets in parallel → one 201, the other 409 IDEMPOTENCY_CONFLICT, no 5xx', async () => {
@@ -229,6 +280,55 @@ describe('idempotency under concurrency', () => {
 });
 
 describe('distinct wallets in parallel', () => {
+  test('lock is per wallet: a BET on wallet B gets 201 in < 1 s while wallet A stays locked', async () => {
+    const LOCK_TIMEOUT_MS = 2_000;
+    const walletA = await createWallet('100.00');
+    const walletB = await createWallet('100.00');
+
+    // outra conexão segura o lock de A até `release()`; `locked` resolve só depois do FOR UPDATE
+    let release = () => {};
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let signalLocked = () => {};
+    const locked = new Promise<void>((resolve) => {
+      signalLocked = resolve;
+    });
+    const holder = orm.em.fork().transactional(async (em) => {
+      await em.execute('SELECT id FROM wallets WHERE id = ? FOR UPDATE', [walletA.id]);
+      signalLocked();
+      await released;
+    });
+
+    try {
+      await locked;
+      const startedAt = performance.now();
+      const res = await submit({
+        walletId: walletB.id,
+        playerId: walletB.playerId,
+        externalTransactionId: 'bet-b',
+        amount: '25.00',
+      });
+      const elapsedMs = performance.now() - startedAt;
+
+      expect(res.status).toBe(201);
+      expect(res.body.balance?.amount).toBe('75.00');
+      expect(elapsedMs).toBeLessThan(LOCK_TIMEOUT_MS / 2);
+
+      // A continua travada neste instante: um FOR UPDATE NOWAIT falha na hora
+      const probe = orm.em
+        .fork()
+        .transactional((em) =>
+          em.execute('SELECT id FROM wallets WHERE id = ? FOR UPDATE NOWAIT', [walletA.id]),
+        );
+      await expect(probe).rejects.toThrow(/could not obtain lock/);
+    } finally {
+      release();
+      await holder;
+    }
+    expect(await balanceOf(walletA.id)).toBe('100.00');
+  });
+
   test('10 wallets × 20 BETs of 7.00 at the same time → per wallet 14 processed, 6 INSUFFICIENT_FUNDS, balance 2.00', async () => {
     const WALLETS = 10;
     const BETS_PER_WALLET = 20;
