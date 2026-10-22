@@ -97,6 +97,11 @@ describe('logs com ids do fluxo de aposta', () => {
     const { transactionId } = (await first.json()) as { transactionId: string };
     await (await submit(body, key, 'corr-replay')).json();
 
+    const completed = logs
+      .lines()
+      .find((l) => l.msg === 'request completed' && l.correlationId === 'corr-first');
+    expect(completed).toMatchObject({ walletId, providerId: PROVIDER_ID });
+
     const lines = logs.withMessage('wager transaction processed');
     expect(lines).toHaveLength(2);
     const line = lines.find((l) => l.correlationId === 'corr-first');

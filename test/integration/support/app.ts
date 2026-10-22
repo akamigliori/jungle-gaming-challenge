@@ -16,14 +16,15 @@ export interface TestApp {
 /**
  * O nestjs-pino mantém um único logger raiz por processo, criado (com destino e nível) pela
  * primeira aplicação que sobe, e as demais o reaproveitam. Por isso toda aplicação de teste escreve
- * neste destino fixo, que repassa as linhas à captura da vez (se houver).
+ * neste destino fixo, que repassa as linhas à captura da vez ou, sem captura, ao stdout (o nível
+ * `TEST_LOG_LEVEL` decide se algo é escrito).
  */
 const logSink = new (class extends Writable {
   target: Writable | undefined;
 
   override _write(chunk: Buffer | string, encoding: BufferEncoding, done: () => void): void {
-    if (this.target) this.target.write(chunk, encoding, done);
-    else done();
+    const out: Writable = this.target ?? process.stdout;
+    out.write(chunk, encoding, done);
   }
 })();
 
@@ -63,17 +64,12 @@ export async function createTestApp(
 
   // o logger raiz pode ser o de outra aplicação (ver `logSink`): captura e nível valem para esta
   const root = PinoLogger.root;
-  const previousLevel = root?.level;
-  if (logDestination && root) {
-    logSink.target = logDestination;
-    root.level = config.logLevel;
-  }
+  if (root) root.level = config.logLevel;
+  logSink.target = logDestination;
   const close = async () => {
     await app.close();
-    if (logDestination && root && previousLevel) {
-      logSink.target = undefined;
-      root.level = previousLevel;
-    }
+    logSink.target = undefined;
+    if (root) root.level = process.env.TEST_LOG_LEVEL ?? 'silent';
   };
   return { app, baseUrl: `http://127.0.0.1:${port}`, close };
 }

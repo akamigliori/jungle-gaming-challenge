@@ -35,7 +35,8 @@ export interface ResolvePendingReferenceParams {
 /**
  * `resolved`: chegou a `PROCESSED`; `rejected`: chegou a `REJECTED`; `rescheduled`: continua
  * pendente, com nova tentativa agendada; `skipped`: já não estava pendente (outra instância
- * resolveu antes). Fora o `skipped`, traz o provedor e as tentativas já feitas, para o log.
+ * resolveu antes). Fora o `skipped`, traz o provedor e `attempts`: o contador de tentativas da
+ * transação depois desta avaliação (`reference_attempts`), qualquer que seja o resultado.
  */
 export type ResolvePendingReferenceResult =
   | { outcome: 'skipped' }

@@ -92,7 +92,7 @@ export class Wallet {
   debit(input: MovementInput, purpose: DebitPurpose = 'WAGER'): WalletLedgerEntry {
     this.assertSameCurrency(input.money);
     if (this._balance.isLessThan(input.money)) {
-      const message = `insufficient funds: balance ${this._balance.toString()}, requested ${input.money.toString()}`;
+      const message = 'insufficient funds';
       throw purpose === 'REVERSAL'
         ? new ReversalInsufficientFundsError(message)
         : new InsufficientFundsError(message);

@@ -54,12 +54,11 @@ export class OutboxPublisherWorker implements OnApplicationBootstrap, BeforeAppl
     const { batchSize, pollIntervalMs } = this.config.outboxPublisher;
     let delayMs = pollIntervalMs;
     try {
-      const { published, failed, failures } = await this.publishOutbox.runOnce();
+      const { published, failures } = await this.publishOutbox.runOnce();
       for (const { error, ...ids } of failures) {
         // ids do evento e só o erro seguro, nunca o conteúdo
         this.logger.warn({ ...ids, err: safeError(error) }, 'outbox message failed to publish');
       }
-      if (failed > 0) this.logger.warn({ published, failed }, 'outbox cycle had failed messages');
       // só lote cheio de sucessos volta na hora; com falhas (SQS fora) espera o intervalo
       if (published >= batchSize) delayMs = 0;
     } catch (error) {

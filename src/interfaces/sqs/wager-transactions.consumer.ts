@@ -255,12 +255,11 @@ export class WagerTransactionsConsumer
       return this.handleFailure(message, error, urls, context);
     }
 
-    await this.ack(message, urls.transactions);
+    // a duração é a do processamento; o ack não entra nela
     const { transaction, idempotentReplay } = result;
-    this.logger.info(
-      { ...context, ...wagerOutcomeFields(transaction, idempotentReplay, startedAt) },
-      'wager message processed',
-    );
+    const outcome = wagerOutcomeFields(transaction, idempotentReplay, startedAt);
+    await this.ack(message, urls.transactions);
+    this.logger.info({ ...context, ...outcome }, 'wager message processed');
     return { left: true };
   }
 

@@ -37,6 +37,8 @@ export function correlationIdFor(req: RequestLike, res: ResponseLike): string {
  */
 export function createLoggerModule(cfg: AppConfig, destination?: Writable): DynamicModule {
   return LoggerModule.forRoot({
+    // ids ligados ao logger da requisição (`assign`) também entram na linha de conclusão
+    assignResponse: true,
     pinoHttp: {
       level: cfg.logLevel,
       ...(destination && { stream: destination }),
