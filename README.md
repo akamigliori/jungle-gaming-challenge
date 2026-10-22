@@ -86,6 +86,11 @@ vê-los, defina `TEST_LOG_LEVEL` (ex.: `TEST_LOG_LEVEL=info bun run test:integra
 | `SQS_RECEIVE_BATCH_SIZE` | `4` | máximo de mensagens por recebimento (até 10); laços × lote = transações ao mesmo tempo, abaixo do pool de 10 conexões |
 | `SQS_WAIT_TIME_SECONDS` | `10` | duração do long polling do consumer (até 20) |
 | `SHUTDOWN_TIMEOUT_MS` | `20000` | prazo para as mensagens em andamento terminarem no desligamento; precisa ser ≥ `SQS_WAIT_TIME_SECONDS` × 1000 + 5000 |
+| `PENDING_REFERENCE_WORKER_ENABLED` | `true` | liga o worker que reavalia transações `PENDING_REFERENCE` nesta instância (`false` desliga; nos testes de integração o padrão é `false`) |
+| `PENDING_REFERENCE_POLL_INTERVAL_MS` | `1000` | intervalo entre ciclos do worker quando não há lote cheio |
+| `REFERENCE_RETRY_BASE_MS` | `2000` | primeira espera por uma referência que ainda não chegou; dobra a cada tentativa |
+| `REFERENCE_RETRY_MAX_MS` | `60000` | teto da espera entre tentativas (≥ `REFERENCE_RETRY_BASE_MS`) |
+| `REFERENCE_MAX_ATTEMPTS` | `10` | avaliações da referência antes de rejeitar (`REFERENCE_NOT_FOUND` ou `REFERENCE_NOT_PROCESSED`) |
 
 ## Endpoints
 

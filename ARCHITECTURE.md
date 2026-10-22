@@ -194,16 +194,84 @@ Depois, numa única transação SQL:
 A referência é resolvida por `(provider_id, reference_external_transaction_id)` e verificada nesta
 ordem; a primeira regra violada decide o `failureCode`:
 
-- ainda não existe → `202 PENDING_REFERENCE` (grava `next_reference_attempt_at`);
+- ainda não existe → `202 PENDING_REFERENCE` (grava `next_reference_attempt_at`; o worker a
+  reavalia depois, ver "Referências fora de ordem");
 - de outro player, wallet, rodada ou moeda → `REFERENCE_MISMATCH`;
 - tipo não permitido pela tabela acima → `INVALID_REFERENCE_KIND` (ex.: `REFUND` de um `WIN`, ou
   `ROLLBACK` de um `LOSS`: o `LOSS` não moveu saldo, não há o que desfazer);
-- referência não está `PROCESSED` → `REFERENCE_NOT_PROCESSED`;
+- referência existe mas ainda não foi decidida (`PENDING` ou `PENDING_REFERENCE`, como um `WIN`
+  que espera a sua `BET`) → também `202 PENDING_REFERENCE`;
+- referência terminou sem ser aplicada (`REJECTED` ou `FAILED`) → `REFERENCE_NOT_PROCESSED`;
 - referência já revertida → `ALREADY_REVERSED`. Vale também para `WIN`/`LOSS`: pagar o `WIN` de
   uma aposta já estornada pagaria duas vezes;
 - só em `REFUND`/`ROLLBACK`: valor diferente do valor da referência → `AMOUNT_MISMATCH`.
 
 `WIN`/`LOSS` sem referência são aceitos sem vínculo (o provedor nem sempre informa a aposta).
+
+### Referências fora de ordem
+
+Um `REFUND` pode chegar antes da sua `BET` (filas diferentes, reentrega, provedor fora de ordem).
+A transação fica `PENDING_REFERENCE` e um worker em segundo plano
+(`PendingReferenceWorker`, um por instância, ligado por `PENDING_REFERENCE_WORKER_ENABLED`) a
+reavalia até a referência aparecer ou as tentativas acabarem.
+
+**Reavaliação** (`ResolvePendingReferenceUseCase`, uma transação SQL por pendência):
+
+1. trava a wallet (`SELECT ... FOR UPDATE`), como todo processamento;
+2. recarrega a transação; se ela não está mais `PENDING_REFERENCE` (outra instância decidiu antes),
+   sai sem efeito;
+3. aplica as mesmas regras do processamento normal (`decideWager`, sem regra duplicada);
+4. grava o resultado com o mesmo código do processamento normal, trocando o `INSERT` da transação
+   por um `UPDATE ... WHERE status = 'PENDING_REFERENCE'` (0 linhas = bug, a transação é desfeita):
+   - resolvida (`PROCESSED`) → saldo, ledger, `WagerTransactionProcessed` + `WalletBalanceChanged`;
+   - rejeitada por regra ou por esgotar as tentativas → `WagerTransactionRejected`;
+   - ainda pendente → só `reference_attempts` e `next_reference_attempt_at`, **sem evento** (um
+     evento a cada tentativa seria ruído para os consumidores).
+
+Os eventos da resolução usam o id da transação pendente como `correlationId`: não há requisição
+ou mensagem de origem viva naquele momento, e o id liga os eventos à transação.
+
+**Backoff e limite.** A espera até a próxima tentativa é `min(base × 2^tentativas, teto)`, sem
+jitter (o worker não disputa nada além do lock da wallet, e o claim já espalha o trabalho entre as
+instâncias). Com os valores padrão (`REFERENCE_RETRY_BASE_MS` 2 s, `REFERENCE_RETRY_MAX_MS` 60 s,
+`REFERENCE_MAX_ATTEMPTS` 10), as esperas são 2, 4, 8, 16, 32 e depois 60 s, e a 10ª avaliação
+desiste: cerca de **6 minutos** desde a chegada. O motivo: o provedor normalmente manda a
+referência em segundos; minutos cobrem atraso de fila e reentrega do próprio provedor sem deixar a
+transação pendente (e o jogador sem resposta) por horas. Os três valores são configuráveis, e os
+testes usam esperas de 100 a 400 ms com 3 avaliações. Ao desistir, a transação vira `REJECTED`
+com um código preciso:
+
+- `REFERENCE_NOT_FOUND`: a referência nunca chegou;
+- `REFERENCE_NOT_PROCESSED`: a referência existe, mas continuou sem decisão (ex.: um `ROLLBACK` de
+  um `WIN` cuja `BET` nunca chegou).
+
+**Acordar dependentes.** Esperar o backoff depois que a referência chega atrasaria um `REFUND` em
+até 60 s. Por isso, quando uma transação termina (`PROCESSED` ou `REJECTED`), na mesma transação
+SQL, as pendentes da mesma wallet e provedor que a referenciam têm `next_reference_attempt_at`
+antecipado para agora (`UPDATE` coberto por um índice parcial só das pendentes). `REJECTED` também
+acorda, para o dependente virar `REFERENCE_NOT_PROCESSED` na hora. Acordar não conta tentativa e
+não gera evento. A cadeia anda sozinha: a `BET` acorda o `WIN`, o `WIN` processado acorda o
+`ROLLBACK`.
+
+**Claim com lease.** Cada ciclo reserva até 50 pendências vencidas numa transação curta
+(`SELECT ... FOR UPDATE SKIP LOCKED`, mais antigas primeiro) e, no mesmo `COMMIT`, empurra o
+`next_reference_attempt_at` delas para daqui a 30 s. Duas instâncias nunca pegam a mesma linha no
+mesmo ciclo; se a instância morrer, as linhas voltam quando o lease vence. O lease não toca em
+`updated_at` (é coordenação entre instâncias, não mudança de negócio). O lote é agrupado por
+wallet: dentro da wallet, um item por vez, na ordem do claim; no máximo 2 wallets ao mesmo tempo
+(seção 9). Um item que falha é logado (só ids) e espera o lease; os demais seguem. Mesmo que duas
+instâncias reavaliem a mesma pendência (lease vencido, ou acordada durante um claim), o lock da
+wallet as serializa e a segunda sai no passo 2.
+
+**Como é testado** (`test/integration/pending-reference.test.ts`, Postgres e LocalStack reais, com
+o worker ligado e a política curta): `REFUND` antes da `BET` → `PROCESSED` com saldo e eventos
+corretos; referência que nunca chega → `REJECTED REFERENCE_NOT_FOUND` com `reference_attempts` = 2
+e `WagerTransactionRejected`; cadeia `WIN` e `ROLLBACK` do `WIN` antes da `BET` → os dois
+`PROCESSED`, na ordem; referência rejeitada → dependente `REFERENCE_NOT_PROCESSED` em menos de dois
+ciclos; duas instâncias do caso de uso sobre a mesma pendência → um único crédito e um `skipped`;
+via SQS, `REFUND` e `BET` no mesmo grupo, nessa ordem → os dois `PROCESSED`. Nos testes de acordar,
+a pendência é empurrada para daqui a 1 hora antes de a referência chegar: só o "acordar" explica a
+resolução no tempo do teste.
 
 ### HTTP
 
@@ -275,6 +343,10 @@ não consome o `lock_timeout`. Os testes de concorrência disparam 200 requisiç
 contra uma instância com esse pool, sem erro. Com N instâncias, N × 10 conexões precisam caber no
 `max_connections` do Postgres (100 por padrão).
 
+O worker de referências pendentes processa no máximo 2 wallets ao mesmo tempo (cada item é uma
+transação curta), para caber junto com as 8 transações do consumer e o tráfego HTTP; o publisher da
+outbox só usa conexão no claim e na marcação, fora de qualquer lock de wallet.
+
 **Pool depois de um timeout.** Um `lock_timeout` (`55P03`) cancela só o comando: a transação é
 desfeita e a conexão volta utilizável para o pool (o teste de integração que segura o lock da
 wallet em outra conexão confere que a re-execução seguinte grava normalmente). Um
@@ -319,9 +391,9 @@ linhas soltas de propósito para provocar cada constraint.
   mudam: o replay devolve o mesmo status, o mesmo `failureCode` e o `balance` gravado na época,
   mesmo que o saldo tenha mudado depois. A rejeição por moeda divergente não tem saldo observado,
   porque o saldo é de outra moeda: `balance` é `null` na resposta original, no replay e nos `GET`s.
-  Uma transação `PENDING_REFERENCE` devolve o seu estado
-  atual (`202` enquanto pendente); quando o processamento das pendências existir e a resolver, o
-  replay passa a devolver o resultado final. O replay nunca tenta resolver a referência na hora.
+  Uma transação `PENDING_REFERENCE` devolve o seu estado atual: `202` enquanto pendente e, depois
+  que o worker a resolve (seção 8), o resultado final (`201` ou `422`, com o saldo gravado na
+  resolução). O replay nunca tenta resolver a referência na hora.
 - **Falha no COMMIT.** Se a conexão cai durante o `COMMIT`, o cliente não sabe se a transação foi
   gravada. Se não foi, o reenvio processa normalmente; se foi, o reenvio encontra a original e
   devolve um replay. Em qualquer caso existe exatamente um efeito no saldo e no ledger.
@@ -565,8 +637,9 @@ na mensagem passa pelas mesmas validações de domínio.
   nos testes para limpar o banco; em produção o usuário da aplicação não deve ter permissão de
   `TRUNCATE`.
 - Autenticação ainda não implementada (ver seção 13).
-- Transações `PENDING_REFERENCE` são gravadas e respondidas com `202`, mas ainda não há um
-  processo que as reprocesse quando a referência chega.
+- O lease do worker de referências pendentes também usa o relógio da instância. Um desvio de
+  relógio só faz duas instâncias reavaliarem a mesma pendência, o que o lock da wallet e a releitura
+  da transação tornam inofensivo; no máximo uma tentativa é contada a mais.
 - O publisher da outbox tenta indefinidamente (backoff até 5 min) e não tem DLQ própria: um evento
   que nunca consegue ser publicado fica pendente, com `attempts` e `last_error` visíveis na tabela.
 - O lease usa o relógio de cada instância (`Clock`), não o do banco: relógios das instâncias
