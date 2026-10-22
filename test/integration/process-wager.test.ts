@@ -152,6 +152,19 @@ afterEach(async () => {
 });
 
 describe('ProcessWagerTransactionUseCase — new transactions', () => {
+  test('uppercase walletId and playerId are normalised: processed against the lowercase wallet', async () => {
+    const walletId = await createWallet();
+
+    const result = await useCase.execute(
+      command(walletId, { walletId: walletId.toUpperCase(), playerId: PLAYER_ID.toUpperCase() }),
+    );
+
+    expect(result.idempotentReplay).toBe(false);
+    expect(result.transaction.status).toBe(WagerTransactionStatus.Processed);
+    expect(result.transaction.walletId).toBe(walletId);
+    expect(await walletRow(walletId)).toEqual({ balance: '75.00', version: 2 });
+  });
+
   test('BET processed → wallet debited; tx + DEBIT ledger + 2 outbox events', async () => {
     const walletId = await createWallet();
 

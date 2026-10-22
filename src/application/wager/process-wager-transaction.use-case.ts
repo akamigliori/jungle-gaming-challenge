@@ -87,7 +87,13 @@ export class ProcessWagerTransactionUseCase {
   }
 
   /** Validações que não dependem do banco; falham antes de abrir a transação. */
-  private validate(cmd: ProcessWagerCommand): ValidatedWager {
+  private validate(input: ProcessWagerCommand): ValidatedWager {
+    // UUIDs em minúsculas antes de qualquer uso: o consumer SQS chega aqui sem o schema HTTP
+    const cmd = {
+      ...input,
+      walletId: input.walletId.toLowerCase(),
+      playerId: input.playerId.toLowerCase(),
+    };
     const money = Money.from(cmd.money);
     if (cmd.kind === WagerTransactionKind.Opening || cmd.providerId === OPENING_PROVIDER_ID) {
       throw new InvalidPayloadError('OPENING transactions and the internal provider are reserved');
