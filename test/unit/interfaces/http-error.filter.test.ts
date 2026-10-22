@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { ConnectionException } from '@mikro-orm/core';
 import type { ArgumentsHost } from '@nestjs/common';
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, HttpException, NotFoundException } from '@nestjs/common';
 import { z } from 'zod';
 import { TransientFailureError } from '../../../src/application/shared/retry-transient';
 import {
@@ -106,6 +106,14 @@ describe('HttpErrorFilter', () => {
   test('error with 5xx or non-exposed status stays 500', () => {
     expect(run(Object.assign(new Error('x'), { status: 503, expose: false })).status).toBe(500);
     expect(run(Object.assign(new Error('x'), { status: 400 })).status).toBe(500);
+  });
+
+  test('HttpException 503 → generic unavailable message, not the original one', () => {
+    const c = run(new HttpException('db password leaked', 503));
+    expect(c.status).toBe(503);
+    expect((c.body as { error: { message: string } }).error.message).toBe(
+      'Service temporarily unavailable',
+    );
   });
 
   test('NotFoundException → 404 NOT_FOUND', () => {

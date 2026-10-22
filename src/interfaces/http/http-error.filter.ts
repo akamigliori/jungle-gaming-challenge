@@ -95,7 +95,7 @@ export class HttpErrorFilter implements ExceptionFilter {
     const status = exception.getStatus();
     if (status === 404) return this.fromCode('NOT_FOUND', exception.message);
     if (status === 401 || status === 403) return this.fromCode('UNAUTHORIZED', exception.message);
-    if (status === 503) return this.fromCode('SERVICE_UNAVAILABLE', exception.message);
+    if (status === 503) return this.fromCode('SERVICE_UNAVAILABLE', UNAVAILABLE_MESSAGE);
     if (status >= 500) return this.fromCode('INTERNAL_ERROR', 'Internal server error');
     // demais 4xx do framework (JSON malformado, corpo grande demais, etc.): payload inválido,
     // preservando o status original
