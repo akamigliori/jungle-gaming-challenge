@@ -35,7 +35,7 @@ import {
 import { IdempotencyConflictError } from '../../src/application/wager/wager-errors';
 import { CreateWalletUseCase } from '../../src/application/wallet/create-wallet.use-case';
 import { WalletNotFoundError } from '../../src/application/wallet/wallet-errors';
-import { InvalidMoneyError, InvalidPayloadError } from '../../src/domain/shared/domain-error';
+import { InvalidPayloadError } from '../../src/domain/shared/domain-error';
 import { DEFAULT_REFERENCE_RETRY } from '../../src/domain/wager/reference-retry';
 import { ReferenceRequiredError } from '../../src/domain/wager/wager-errors';
 import { WagerTransactionKind } from '../../src/domain/wager/wager-transaction-kind';
@@ -508,20 +508,52 @@ describe('ProcessWagerTransactionUseCase — validation and failures', () => {
     expect(await counts()).toEqual(before);
   });
 
-  test('WIN that would overflow NUMERIC(20,2) → InvalidMoneyError; nothing written, balance intact', async () => {
+  test('WIN that would overflow NUMERIC(20,2) → REJECTED BALANCE_LIMIT_EXCEEDED; balance intact', async () => {
     const walletId = await createWallet('999999999999999999.99');
     const before = await counts();
 
-    const attempt = useCase.execute(
+    const result = await useCase.execute(
       command(walletId, {
         kind: WagerTransactionKind.Win,
         money: { amount: '1.00', currency: 'BRL' },
       }),
     );
 
-    await expect(attempt).rejects.toBeInstanceOf(InvalidMoneyError);
-    expect(await counts()).toEqual(before);
+    expect(result.transaction.status).toBe(WagerTransactionStatus.Rejected);
+    expect(result.transaction.failureCode).toBe('BALANCE_LIMIT_EXCEEDED');
+    expect(await counts()).toEqual({
+      transactions: before.transactions + 1,
+      ledger: before.ledger,
+      outbox: before.outbox + 1,
+    });
+    expect(await outboxTypesFor(result.transaction.id)).toEqual(['WagerTransactionRejected']);
     expect(await walletRow(walletId)).toEqual({ balance: '999999999999999999.99', version: 1 });
+  });
+
+  test('REFUND whose credit would overflow NUMERIC(20,2) → REJECTED BALANCE_LIMIT_EXCEEDED', async () => {
+    const walletId = await createWallet('999999999999999990.00');
+    await useCase.execute(command(walletId));
+    await useCase.execute(
+      command(walletId, {
+        externalTransactionId: 'win-1',
+        kind: WagerTransactionKind.Win,
+        referenceExternalTransactionId: 'bet-1',
+        money: { amount: '30.00', currency: 'BRL' },
+      }),
+    );
+    const balanceBefore = await walletRow(walletId);
+
+    const result = await useCase.execute(
+      command(walletId, {
+        externalTransactionId: 'refund-1',
+        kind: WagerTransactionKind.Refund,
+        referenceExternalTransactionId: 'bet-1',
+      }),
+    );
+
+    expect(result.transaction.status).toBe(WagerTransactionStatus.Rejected);
+    expect(result.transaction.failureCode).toBe('BALANCE_LIMIT_EXCEEDED');
+    expect(await walletRow(walletId)).toEqual(balanceBefore);
   });
 
   test('REFUND without reference → ReferenceRequiredError', async () => {

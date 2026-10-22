@@ -41,6 +41,7 @@ describe('Money', () => {
     expect(() => brl('500000000000000000.00').add(brl('500000000000000000.00'))).toThrow(
       InvalidMoneyError,
     );
+    expect(() => max.add(brl('0.01'))).toThrow('resulting amount exceeds NUMERIC(20,2) range');
     expect(max.add(brl('0.00')).toJSON().amount).toBe('999999999999999999.99');
   });
 

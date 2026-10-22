@@ -47,7 +47,7 @@ export class Money {
     const sum = this.value.plus(other.value);
     // estouro de NUMERIC(20,2) vira erro de domínio, nunca erro de banco
     if (sum.abs().greaterThanOrEqualTo(MAX_EXCLUSIVE)) {
-      throw new InvalidMoneyError(`amount must have at most ${MAX_INTEGER_DIGITS} integer digits`);
+      throw new InvalidMoneyError('resulting amount exceeds NUMERIC(20,2) range');
     }
     return new Money(sum, this.currency);
   }
