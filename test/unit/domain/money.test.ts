@@ -35,6 +35,15 @@ describe('Money', () => {
     expect(brl('999999999999999999.99').toJSON().amount).toBe('999999999999999999.99');
   });
 
+  test('add beyond the NUMERIC(20,2) range throws InvalidMoneyError instead of a database error', () => {
+    const max = brl('999999999999999999.99');
+    expect(() => max.add(brl('0.01'))).toThrow(InvalidMoneyError);
+    expect(() => brl('500000000000000000.00').add(brl('500000000000000000.00'))).toThrow(
+      InvalidMoneyError,
+    );
+    expect(max.add(brl('0.00')).toJSON().amount).toBe('999999999999999999.99');
+  });
+
   test.each(['brl', 'BR', 'BRLL', ''])('rejects currency %p', (currency) => {
     expect(() => Money.from({ amount: '1.00', currency })).toThrow(InvalidMoneyError);
   });

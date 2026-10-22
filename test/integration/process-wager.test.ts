@@ -35,7 +35,7 @@ import {
 import { IdempotencyConflictError } from '../../src/application/wager/wager-errors';
 import { CreateWalletUseCase } from '../../src/application/wallet/create-wallet.use-case';
 import { WalletNotFoundError } from '../../src/application/wallet/wallet-errors';
-import { InvalidPayloadError } from '../../src/domain/shared/domain-error';
+import { InvalidMoneyError, InvalidPayloadError } from '../../src/domain/shared/domain-error';
 import { DEFAULT_REFERENCE_RETRY } from '../../src/domain/wager/reference-retry';
 import { ReferenceRequiredError } from '../../src/domain/wager/wager-errors';
 import { WagerTransactionKind } from '../../src/domain/wager/wager-transaction-kind';
@@ -506,6 +506,22 @@ describe('ProcessWagerTransactionUseCase — validation and failures', () => {
       InvalidPayloadError,
     );
     expect(await counts()).toEqual(before);
+  });
+
+  test('WIN that would overflow NUMERIC(20,2) → InvalidMoneyError; nothing written, balance intact', async () => {
+    const walletId = await createWallet('999999999999999999.99');
+    const before = await counts();
+
+    const attempt = useCase.execute(
+      command(walletId, {
+        kind: WagerTransactionKind.Win,
+        money: { amount: '1.00', currency: 'BRL' },
+      }),
+    );
+
+    await expect(attempt).rejects.toBeInstanceOf(InvalidMoneyError);
+    expect(await counts()).toEqual(before);
+    expect(await walletRow(walletId)).toEqual({ balance: '999999999999999999.99', version: 1 });
   });
 
   test('REFUND without reference → ReferenceRequiredError', async () => {
