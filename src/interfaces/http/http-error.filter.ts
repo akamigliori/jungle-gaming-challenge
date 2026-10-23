@@ -94,7 +94,8 @@ export class HttpErrorFilter implements ExceptionFilter {
   private fromHttpException(exception: HttpException): ResolvedError {
     const status = exception.getStatus();
     if (status === 404) return this.fromCode('NOT_FOUND', exception.message);
-    if (status === 401 || status === 403) return this.fromCode('UNAUTHORIZED', exception.message);
+    if (status === 401) return this.fromCode('UNAUTHORIZED', 'Authentication required');
+    if (status === 403) return this.fromCode('FORBIDDEN', 'Forbidden');
     if (status === 503) return this.fromCode('SERVICE_UNAVAILABLE', UNAVAILABLE_MESSAGE);
     if (status >= 500) return this.fromCode('INTERNAL_ERROR', 'Internal server error');
     // demais 4xx do framework (JSON malformado, corpo grande demais, etc.): payload inválido,

@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  ForbiddenException,
   Get,
   Headers,
   HttpStatus,
@@ -15,6 +16,9 @@ import { ProcessWagerTransactionUseCase } from '../../../application/wager/proce
 import { InvalidPayloadError } from '../../../domain/shared/domain-error';
 import { WagerTransactionKind } from '../../../domain/wager/wager-transaction-kind';
 import { WagerTransactionStatus } from '../../../domain/wager/wager-transaction-status';
+import type { AuthenticatedRequest } from '../../../infrastructure/auth/auth-request';
+import { RequireScope } from '../../../infrastructure/auth/require-scope.decorator';
+import { SCOPE_WAGERS_READ, SCOPE_WAGERS_SUBMIT } from '../../../infrastructure/auth/scopes';
 import { wagerOutcomeFields } from '../../../infrastructure/logging/wager-log';
 import {
   type WagerTransactionDto,
@@ -31,8 +35,8 @@ import {
   transactionIdParamsSchema,
 } from './wager.dto';
 
-/** Requisição com o correlation id gravado pelo pino-http. */
-interface RequestWithId {
+/** Requisição com o correlation id gravado pelo pino-http e o contexto de autenticação. */
+interface RequestWithId extends AuthenticatedRequest {
   id: string;
 }
 
@@ -61,6 +65,7 @@ export class WageringController {
    * é um resultado gravado, não uma exceção). Replay devolve o mesmo status do original.
    */
   @Post('wagering/transactions')
+  @RequireScope(SCOPE_WAGERS_SUBMIT)
   async submit(
     @Body() body: unknown,
     @Headers('idempotency-key') idempotencyKeyHeader: unknown,
@@ -72,6 +77,9 @@ export class WageringController {
       throw new InvalidPayloadError('Idempotency-Key header is required (1 to 255 characters)');
     }
     const input = submitWagerBodySchema.parse(body);
+    if (req.auth && req.auth.providerId !== input.providerId) {
+      throw new ForbiddenException();
+    }
     // ids já validados: entram em todas as linhas da requisição, inclusive a do filtro de erros
     this.logger.assign({ walletId: input.walletId, providerId: input.providerId });
 
@@ -96,14 +104,30 @@ export class WageringController {
   }
 
   @Get('wagering/transactions/:transactionId')
-  async findById(@Param() params: unknown): Promise<WagerTransactionDto> {
+  @RequireScope(SCOPE_WAGERS_READ)
+  async findById(
+    @Param() params: unknown,
+    @Req() req: RequestWithId,
+  ): Promise<WagerTransactionDto> {
     const { transactionId } = transactionIdParamsSchema.parse(params);
-    return found(await this.transactions.findById(transactionId));
+    const transaction = await this.transactions.findById(transactionId);
+    // outro provedor não enxerga a transação: responde 404 sem revelar que ela existe
+    if (transaction && req.auth && req.auth.providerId !== transaction.providerId) {
+      throw new NotFoundException('transaction not found');
+    }
+    return found(transaction);
   }
 
   @Get('providers/:providerId/wagering/transactions/:externalTransactionId')
-  async findByExternalId(@Param() params: unknown): Promise<WagerTransactionDto> {
+  @RequireScope(SCOPE_WAGERS_READ)
+  async findByExternalId(
+    @Param() params: unknown,
+    @Req() req: RequestWithId,
+  ): Promise<WagerTransactionDto> {
     const { providerId, externalTransactionId } = providerTransactionParamsSchema.parse(params);
+    if (req.auth && req.auth.providerId !== providerId) {
+      throw new NotFoundException('transaction not found');
+    }
     return found(await this.transactions.findByExternalId(providerId, externalTransactionId));
   }
 }

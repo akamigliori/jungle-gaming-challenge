@@ -9,6 +9,8 @@ import { ReconcileWalletUseCase } from '../../../application/wallet/reconcile-wa
 import { WalletNotFoundError } from '../../../application/wallet/wallet-errors';
 import type { ReconciliationReport } from '../../../application/wallet/wallet-reconciliation';
 import type { Wallet } from '../../../domain/wallet/wallet';
+import { RequireScope } from '../../../infrastructure/auth/require-scope.decorator';
+import { SCOPE_WALLETS_MANAGE } from '../../../infrastructure/auth/scopes';
 import {
   type LedgerItemDto,
   LedgerQuery,
@@ -33,6 +35,7 @@ interface LedgerResponse {
 }
 
 @Controller('wallets')
+@RequireScope(SCOPE_WALLETS_MANAGE)
 export class WalletsController {
   constructor(
     private readonly createWallet: CreateWalletUseCase,
