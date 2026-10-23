@@ -1,7 +1,13 @@
 import { describe, expect, test } from 'bun:test';
 import { ConnectionException } from '@mikro-orm/core';
 import type { ArgumentsHost } from '@nestjs/common';
-import { BadRequestException, HttpException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  HttpException,
+  NotFoundException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { z } from 'zod';
 import { TransientFailureError } from '../../../src/application/shared/retry-transient';
 import {
@@ -120,6 +126,22 @@ describe('HttpErrorFilter', () => {
     const c = run(new NotFoundException('Cannot GET /nope'));
     expect(c.status).toBe(404);
     expect((c.body as { error: { code: string } }).error.code).toBe('NOT_FOUND');
+  });
+
+  test('UnauthorizedException → 401 UNAUTHORIZED with generic message', () => {
+    const c = run(new UnauthorizedException('senha vazou?'));
+    expect(c.status).toBe(401);
+    expect(c.body).toEqual({
+      error: { code: 'UNAUTHORIZED', message: 'Authentication required', retryable: false },
+    });
+  });
+
+  test('ForbiddenException → 403 FORBIDDEN with generic message', () => {
+    const c = run(new ForbiddenException('provider não bate'));
+    expect(c.status).toBe(403);
+    expect(c.body).toEqual({
+      error: { code: 'FORBIDDEN', message: 'Forbidden', retryable: false },
+    });
   });
 
   test('database connection error → 503 retryable with Retry-After', () => {

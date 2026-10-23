@@ -3,6 +3,7 @@ import type { DynamicModule } from '@nestjs/common';
 import { Module } from '@nestjs/common';
 import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import { AuthGuard } from './infrastructure/auth/auth.guard';
+import { AuthModule } from './infrastructure/auth/auth.module';
 import type { AppConfig } from './infrastructure/config/config';
 import { InfrastructureModule } from './infrastructure/infrastructure.module';
 import { HealthController } from './interfaces/http/health.controller';
@@ -21,6 +22,7 @@ export class AppModule {
       module: AppModule,
       imports: [
         InfrastructureModule.forRoot(config, logDestination),
+        AuthModule,
         PersistenceModule,
         MetricsModule,
         WalletModule,

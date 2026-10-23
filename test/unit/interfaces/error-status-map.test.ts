@@ -8,6 +8,7 @@ describe('statusFor', () => {
     ['INVALID_MONEY', 400],
     ['REFERENCE_REQUIRED', 400],
     ['UNAUTHORIZED', 401],
+    ['FORBIDDEN', 403],
     ['NOT_FOUND', 404],
     ['WALLET_NOT_FOUND', 404],
     ['IDEMPOTENCY_CONFLICT', 409],

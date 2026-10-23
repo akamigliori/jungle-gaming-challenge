@@ -25,4 +25,5 @@ export type ErrorCode =
   | 'WALLET_ALREADY_EXISTS'
   | 'NOT_FOUND'
   | 'UNAUTHORIZED'
+  | 'FORBIDDEN'
   | 'SERVICE_UNAVAILABLE';
