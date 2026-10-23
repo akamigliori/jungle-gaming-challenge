@@ -45,6 +45,12 @@ export interface AppConfig {
     leaseMs: number;
     retry: ReferenceRetryPolicy;
   };
+  auth: {
+    enabled: boolean;
+    oidcIssuer: string;
+    oidcAudience: string;
+    oidcJwksUri: string;
+  };
   logLevel: string;
 }
 
@@ -95,6 +101,10 @@ const fieldsSchema = z.object({
     .positive()
     .default(DEFAULT_REFERENCE_RETRY.baseMs),
   REFERENCE_RETRY_MAX_MS: z.coerce.number().int().positive().default(DEFAULT_REFERENCE_RETRY.maxMs),
+  AUTH_ENABLED: z.stringbool().default(false),
+  OIDC_ISSUER: z.string().default(''),
+  OIDC_AUDIENCE: z.string().default(''),
+  OIDC_JWKS_URI: z.string().default(''),
 });
 
 // o shutdown espera o long poll em andamento terminar: o prazo tem de cobri-lo
@@ -113,6 +123,22 @@ const envSchema = fieldsSchema.superRefine((e, ctx) => {
       path: ['REFERENCE_RETRY_MAX_MS'],
       message: 'must be >= REFERENCE_RETRY_BASE_MS',
     });
+  }
+  // com a autenticação ligada, o IdP precisa estar configurado
+  if (e.AUTH_ENABLED) {
+    for (const [key, value] of [
+      ['OIDC_ISSUER', e.OIDC_ISSUER],
+      ['OIDC_AUDIENCE', e.OIDC_AUDIENCE],
+      ['OIDC_JWKS_URI', e.OIDC_JWKS_URI],
+    ] as const) {
+      if (value.length === 0) {
+        ctx.addIssue({
+          code: 'custom',
+          path: [key],
+          message: 'is required when AUTH_ENABLED is true',
+        });
+      }
+    }
   }
 });
 
@@ -162,6 +188,12 @@ export function loadConfig(env: Env = process.env): AppConfig {
         maxMs: e.REFERENCE_RETRY_MAX_MS,
         maxAttempts: e.REFERENCE_MAX_ATTEMPTS,
       },
+    },
+    auth: {
+      enabled: e.AUTH_ENABLED,
+      oidcIssuer: e.OIDC_ISSUER,
+      oidcAudience: e.OIDC_AUDIENCE,
+      oidcJwksUri: e.OIDC_JWKS_URI,
     },
     logLevel: e.LOG_LEVEL,
   };
