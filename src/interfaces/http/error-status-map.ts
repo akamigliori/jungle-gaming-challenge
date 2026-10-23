@@ -18,6 +18,7 @@ const STATUS_BY_CODE: Record<ErrorCode, ErrorHttpStatus> = {
   REFERENCE_REQUIRED: fail(400),
   // autenticação
   UNAUTHORIZED: fail(401),
+  FORBIDDEN: fail(403),
   // recurso inexistente
   NOT_FOUND: fail(404),
   WALLET_NOT_FOUND: fail(404),
