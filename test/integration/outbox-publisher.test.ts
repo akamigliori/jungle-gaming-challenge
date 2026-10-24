@@ -291,9 +291,16 @@ describe('outbox publisher', () => {
     const [failing, ...others] = await seedOutbox(3, clock.now(), 3);
     const real = new SqsEventPublisher(sqs, config);
     const flaky: EventPublisher = {
-      publish: async (message: OutboxMessage) => {
-        if (message.id === failing?.id) throw new Error(`sqs unavailable ${'x'.repeat(1000)}`);
-        await real.publish(message);
+      publishBatch: async (messages) => {
+        const toSend = messages.filter((m) => m.id !== failing?.id);
+        const { published, failed } = await real.publishBatch(toSend);
+        return {
+          published,
+          failed: [
+            ...failed,
+            ...(failing ? [{ id: failing.id, error: `sqs unavailable ${'x'.repeat(1000)}` }] : []),
+          ],
+        };
       },
     };
 
@@ -381,34 +388,36 @@ describe('outbox publisher', () => {
     expect(row?.last_error).toBeNull();
   });
 
-  test('a failure stops its wallet for the cycle; next cycle publishes the wallet in order', async () => {
+  test('a failure reschedules the message and does not block the rest of the batch', async () => {
     const clock = new FakeClock(new Date());
-    const [first, second] = await seedOutbox(2, clock.now());
+    const [first] = await seedOutbox(2, clock.now());
     const real = new SqsEventPublisher(sqs, config);
     let failOnce = true;
     const flaky: EventPublisher = {
-      publish: async (message: OutboxMessage) => {
-        if (message.id === first?.id && failOnce) {
-          failOnce = false;
-          throw new Error('sqs unavailable');
-        }
-        await real.publish(message);
+      publishBatch: async (messages) => {
+        const failNow = failOnce && messages.some((m) => m.id === first?.id);
+        if (failNow) failOnce = false;
+        const toSend = failNow ? messages.filter((m) => m.id !== first?.id) : messages;
+        const { published, failed } = await real.publishBatch(toSend);
+        return {
+          published,
+          failed: [
+            ...failed,
+            ...(failNow ? [{ id: first?.id as string, error: 'sqs unavailable' }] : []),
+          ],
+        };
       },
     };
     const useCase = newPublisher(clock, flaky);
 
-    expect(await useCase.runOnce()).toMatchObject({ published: 0, failed: 1 });
-    expect(await receiveEvents(1, 1)).toHaveLength(0);
+    expect(await useCase.runOnce()).toMatchObject({ published: 1, failed: 1 });
+    expect(await receiveEvents(1)).toHaveLength(1);
     const rows = await outboxRows();
     expect(rows.map((r) => r.attempts)).toEqual([1, 0]);
-    expect(rows[1]?.next_attempt_at).toEqual(rows[0]?.next_attempt_at as Date);
 
     clock.advance(LEASE_MS);
-    expect(await useCase.runOnce()).toMatchObject({ published: 2, failed: 0 });
-    expect((await receiveEvents(2)).map((r) => r.eventId)).toEqual([
-      first?.id as string,
-      second?.id as string,
-    ]);
+    expect(await useCase.runOnce()).toMatchObject({ published: 1, failed: 0 });
+    expect((await receiveEvents(1)).map((r) => r.eventId)).toEqual([first?.id as string]);
   });
 
   test('markPublished is idempotent: a late second mark does not fail nor overwrite the first', async () => {

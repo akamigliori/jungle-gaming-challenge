@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import { PublishOutboxUseCase } from '../../../src/application/messaging/publish-outbox.use-case';
-import type { EventPublisher } from '../../../src/application/ports/event-publisher';
+import type {
+  BatchPublishResult,
+  EventPublisher,
+} from '../../../src/application/ports/event-publisher';
 import type {
   ClaimDueParams,
   OutboxRepository,
@@ -33,7 +36,6 @@ class RecordingOutbox implements OutboxRepository {
     error: string;
     claimedUntil: Date;
   }[] = [];
-  postponed: { ids: string[]; until: Date; claimedUntil: Date }[] = [];
   failMarkFor = new Set<string>();
 
   constructor(private readonly batch: OutboxMessage[]) {}
@@ -66,6 +68,8 @@ class RecordingOutbox implements OutboxRepository {
   async postpone(ids: string[], p: { until: Date; claimedUntil: Date }): Promise<void> {
     this.postponed.push({ ids, ...p });
   }
+
+  postponed: { ids: string[]; until: Date; claimedUntil: Date }[] = [];
 }
 
 function useCase(outbox: OutboxRepository, publisher: EventPublisher) {
@@ -81,32 +85,35 @@ function useCase(outbox: OutboxRepository, publisher: EventPublisher) {
 }
 
 describe('PublishOutboxUseCase', () => {
-  test('claims with now/batchSize/lease and publishes each wallet in order', async () => {
+  test('claims with now/batchSize/lease and publishes all messages in one batch', async () => {
     const outbox = new RecordingOutbox([
       message('a1', 'wa'),
       message('b1', 'wb'),
       message('a2', 'wa'),
       message('a3', 'wa'),
     ]);
-    const sent: string[] = [];
+    const chunks: OutboxMessage[][] = [];
     const result = await useCase(outbox, {
-      publish: async (m) => {
-        sent.push(m.id);
+      publishBatch: async (msgs) => {
+        chunks.push(msgs);
+        return { published: msgs.map((m) => m.id), failed: [] };
       },
     }).runOnce();
 
     expect(result).toEqual({ published: 4, failed: 0, failures: [] });
     expect(outbox.claims).toEqual([{ now, limit: 50, leaseMs: 30_000 }]);
-    expect(sent.filter((id) => id.startsWith('a'))).toEqual(['a1', 'a2', 'a3']);
-    expect(outbox.published.sort()).toEqual(['a1', 'a2', 'a3', 'b1']);
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]?.map((m) => m.id)).toEqual(['a1', 'b1', 'a2', 'a3']);
+    expect(outbox.published).toEqual(['a1', 'b1', 'a2', 'a3']);
   });
 
-  test('a failing publish is rescheduled with backoff and does not stop other wallets', async () => {
+  test('a failing entry is rescheduled with backoff and the others are published', async () => {
     const outbox = new RecordingOutbox([message('a1', 'wa'), message('b1', 'wb')]);
     const result = await useCase(outbox, {
-      publish: async (m) => {
-        if (m.id === 'a1') throw new Error('sqs down');
-      },
+      publishBatch: async (): Promise<BatchPublishResult> => ({
+        published: ['b1'],
+        failed: [{ id: 'a1', error: 'sqs down' }],
+      }),
     }).runOnce();
 
     expect(result).toMatchObject({ published: 1, failed: 1 });
@@ -131,42 +138,51 @@ describe('PublishOutboxUseCase', () => {
     ]);
   });
 
-  test('a failure stops that wallet for the cycle: the next ones are postponed to the same retry time', async () => {
-    const outbox = new RecordingOutbox([
-      message('a1', 'wa'),
-      message('a2', 'wa'),
-      message('a3', 'wa'),
-    ]);
-    const sent: string[] = [];
+  test('a whole-batch send failure reschedules every message', async () => {
+    const outbox = new RecordingOutbox([message('a1', 'wa'), message('b1', 'wb')]);
     const result = await useCase(outbox, {
-      publish: async (m) => {
-        sent.push(m.id);
-        if (m.id === 'a1') throw new Error('sqs down');
+      publishBatch: async () => {
+        throw new Error('sqs down');
       },
     }).runOnce();
 
-    expect(result).toMatchObject({ published: 0, failed: 1 });
-    expect(sent).toEqual(['a1']);
+    expect(result).toMatchObject({ published: 0, failed: 2 });
     expect(outbox.published).toEqual([]);
-    expect(outbox.postponed).toEqual([
-      { ids: ['a2', 'a3'], until: new Date(now.getTime() + 1000), claimedUntil: now },
-    ]);
+    expect(outbox.rescheduled.map((r) => r.id).sort()).toEqual(['a1', 'b1']);
   });
 
-  test('a database error while marking rejects the cycle only after the other wallets finished', async () => {
+  test('sends the claimed batch in chunks of up to 10', async () => {
+    const messages = Array.from({ length: 25 }, (_, i) => message(`m${i}`, `w${i}`));
+    const outbox = new RecordingOutbox(messages);
+    const chunkSizes: number[] = [];
+    await useCase(outbox, {
+      publishBatch: async (msgs) => {
+        chunkSizes.push(msgs.length);
+        return { published: msgs.map((m) => m.id), failed: [] };
+      },
+    }).runOnce();
+
+    expect(chunkSizes).toEqual([10, 10, 5]);
+    expect(outbox.published).toHaveLength(25);
+  });
+
+  test('a database error while marking rejects the cycle', async () => {
     const outbox = new RecordingOutbox([message('a1', 'wa'), message('b1', 'wb')]);
     outbox.failMarkFor.add('a1');
 
-    await expect(useCase(outbox, { publish: async () => {} }).runOnce()).rejects.toThrow('db down');
-    expect(outbox.published).toEqual(['b1']);
+    await expect(
+      useCase(outbox, {
+        publishBatch: async (msgs) => ({ published: msgs.map((m) => m.id), failed: [] }),
+      }).runOnce(),
+    ).rejects.toThrow('db down');
   });
 
   test('empty batch -> nothing published', async () => {
     const outbox = new RecordingOutbox([]);
-    expect(await useCase(outbox, { publish: async () => {} }).runOnce()).toEqual({
-      published: 0,
-      failed: 0,
-      failures: [],
-    });
+    expect(
+      await useCase(outbox, {
+        publishBatch: async () => ({ published: [], failed: [] }),
+      }).runOnce(),
+    ).toEqual({ published: 0, failed: 0, failures: [] });
   });
 });
