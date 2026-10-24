@@ -19,6 +19,12 @@ export class MikroOrmOutboxRepository implements OutboxRepository {
     await this.em.insert(OutboxSchema, toRecord(message));
   }
 
+  /** `INSERT` em lote (uma única instrução) na mesma transação da mudança. */
+  async enqueueMany(messages: readonly OutboxMessage[]): Promise<void> {
+    if (messages.length === 0) return;
+    await this.em.insertMany(OutboxSchema, messages.map(toRecord));
+  }
+
   /**
    * `FOR UPDATE SKIP LOCKED`: duas instâncias reservando ao mesmo tempo nunca pegam a mesma
    * linha (uma pula as que a outra travou). No mesmo `COMMIT`, o `next_attempt_at` vai para
@@ -65,10 +71,11 @@ export class MikroOrmOutboxRepository implements OutboxRepository {
   }
 
   /** `published_at IS NULL` no filtro: a segunda marcação (corrida após lease vencido) é no-op. */
-  async markPublished(id: string, at: Date): Promise<void> {
+  async markPublished(ids: readonly string[], at: Date): Promise<void> {
+    if (ids.length === 0) return;
     await this.em.execute(
-      'UPDATE outbox_messages SET published_at = ? WHERE id = ? AND published_at IS NULL',
-      [at, id],
+      'UPDATE outbox_messages SET published_at = ? WHERE id IN (?) AND published_at IS NULL',
+      [at, ids],
     );
   }
 
