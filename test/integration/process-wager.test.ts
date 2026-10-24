@@ -583,8 +583,8 @@ describe('ProcessWagerTransactionUseCase — validation and failures', () => {
   test('when the outbox insert fails, no tx/ledger/outbox row remains and the balance is intact', async () => {
     const walletId = await createWallet();
     const before = await counts();
-    const failingOutbox: Pick<OutboxRepository, 'enqueue'> = {
-      enqueue: () => Promise.reject(new Error('outbox unavailable')),
+    const failingOutbox: Pick<OutboxRepository, 'enqueueMany'> = {
+      enqueueMany: () => Promise.reject(new Error('outbox unavailable')),
     };
     const broken = await createTestApp({}, (builder) =>
       builder.overrideProvider(OUTBOX_REPOSITORY).useValue(failingOutbox),
@@ -698,8 +698,8 @@ describe('ProcessWagerTransactionUseCase — inbox', () => {
 
   test('when the outbox insert fails, no inbox row remains', async () => {
     const walletId = await createWallet();
-    const failingOutbox: Pick<OutboxRepository, 'enqueue'> = {
-      enqueue: () => Promise.reject(new Error('outbox unavailable')),
+    const failingOutbox: Pick<OutboxRepository, 'enqueueMany'> = {
+      enqueueMany: () => Promise.reject(new Error('outbox unavailable')),
     };
     const broken = await createTestApp({}, (builder) =>
       builder.overrideProvider(OUTBOX_REPOSITORY).useValue(failingOutbox),

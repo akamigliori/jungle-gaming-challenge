@@ -234,7 +234,7 @@ describe('outbox publisher', () => {
     expect(first.map((m) => m.id)).toEqual([v1]);
     expect(first[0]?.walletVersion).toBe(1);
 
-    await outbox.markPublished(v1, now);
+    await outbox.markPublished([v1], now);
     const second = await outbox.claimDue({ now, limit: 10, leaseMs: LEASE_MS });
     expect(second.map((m) => m.id)).toEqual([v2]);
     expect(second[0]?.walletVersion).toBe(2);
@@ -425,9 +425,9 @@ describe('outbox publisher', () => {
     const [event] = await seedOutbox(1, clock.now());
     const first = clock.now();
 
-    await outbox.markPublished(event?.id as string, first);
+    await outbox.markPublished([event?.id as string], first);
     clock.advance(1000);
-    await outbox.markPublished(event?.id as string, clock.now());
+    await outbox.markPublished([event?.id as string], clock.now());
 
     const [row] = await outboxRows();
     expect(row?.published_at).toEqual(first);

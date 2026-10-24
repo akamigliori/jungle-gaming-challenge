@@ -37,11 +37,11 @@ export interface PublishOutboxResult {
 
 /**
  * Um ciclo do publisher da outbox: reserva um lote de eventos já confirmados no banco e publica
- * tudo em chamadas em lote de até `SEND_BATCH_MAX`, fora de qualquer transação, registrando o
- * resultado por entrada.
+ * tudo em chamadas em lote de até `SEND_BATCH_MAX`, fora de qualquer transação, marcando as
+ * publicadas numa única escrita no fim do ciclo.
  *
- * - Sucesso → `published_at`. Falha → nova tentativa com backoff (`scheduleRetry`); a ordem por
- *   wallet continua garantida pelo claim (cabeça por wallet), não por este código.
+ * - Sucesso → `published_at` (em lote). Falha → nova tentativa com backoff (`scheduleRetry`); a
+ *   ordem por wallet continua garantida pelo claim (cabeça por wallet), não por este código.
  * - Uma chamada em lote que nem chega a acontecer (rede) marca o lote inteiro como falho.
  * - Garantia at-least-once: se o processo morrer entre publicar e marcar, a mensagem é publicada
  *   de novo depois do lease, com o mesmo `eventId` (o consumidor deduplica por ele).
@@ -54,15 +54,17 @@ export class PublishOutboxUseCase {
     const batch = await outbox.claimDue({ now: clock.now(), limit: batchSize, leaseMs });
 
     const result: PublishOutboxResult = { published: 0, failed: 0, failures: [] };
+    const publishedIds: string[] = [];
     for (let i = 0; i < batch.length; i += SEND_BATCH_MAX) {
       const chunk = batch.slice(i, i + SEND_BATCH_MAX);
       const { published, failures } = await this.publishChunk(chunk);
-      for (const id of published) {
-        await outbox.markPublished(id, clock.now());
-      }
+      publishedIds.push(...published);
       result.published += published.length;
       result.failed += failures.length;
       result.failures.push(...failures);
+    }
+    if (publishedIds.length > 0) {
+      await outbox.markPublished(publishedIds, clock.now());
     }
     return result;
   }

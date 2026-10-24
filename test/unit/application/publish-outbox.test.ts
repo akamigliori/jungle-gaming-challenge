@@ -41,15 +41,16 @@ class RecordingOutbox implements OutboxRepository {
   constructor(private readonly batch: OutboxMessage[]) {}
 
   async enqueue(): Promise<void> {}
+  async enqueueMany(): Promise<void> {}
 
   async claimDue(params: ClaimDueParams): Promise<OutboxMessage[]> {
     this.claims.push(params);
     return this.batch;
   }
 
-  async markPublished(id: string): Promise<void> {
-    if (this.failMarkFor.has(id)) throw new Error('db down');
-    this.published.push(id);
+  async markPublished(ids: readonly string[]): Promise<void> {
+    for (const id of ids) if (this.failMarkFor.has(id)) throw new Error('db down');
+    this.published.push(...ids);
   }
 
   async reschedule(
