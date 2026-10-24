@@ -25,6 +25,7 @@ export class SqsEventPublisher implements EventPublisher {
   ) {}
 
   async publishBatch(messages: OutboxMessage[]): Promise<BatchPublishResult> {
+    const byId = new Map(messages.map((message, index) => [String(index), message]));
     const { Successful = [], Failed = [] } = await this.sqs.send(
       new SendMessageBatchCommand({
         QueueUrl: await this.resolveQueueUrl(),
@@ -37,11 +38,11 @@ export class SqsEventPublisher implements EventPublisher {
       }),
     );
     return {
-      published: Successful.map((entry) => messages[Number(entry.Id)]?.id).filter(
+      published: Successful.map((entry) => byId.get(entry.Id ?? '')?.id).filter(
         (id): id is string => id !== undefined,
       ),
       failed: Failed.map((entry) => ({
-        id: messages[Number(entry.Id)]?.id ?? entry.Id ?? 'unknown',
+        id: byId.get(entry.Id ?? '')?.id ?? entry.Id ?? 'unknown',
         error: entry.Message ?? 'send failed',
       })),
     };
