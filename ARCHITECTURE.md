@@ -625,7 +625,12 @@ testes de integração criam filas próprias, com nomes aleatórios); mudá-las 
 cria. A aplicação não cria nem confere os atributos das filas: em produção elas vêm da
 infraestrutura e precisam repetir a configuração local — FIFO, deduplicação explícita
 (`ContentBasedDeduplication=false`), `VisibilityTimeout` de 60 s (acima do pior caso de ≈ 24,3 s
-do processamento, seção 9) e redrive para a DLQ FIFO com `maxReceiveCount` 10. O 10 vem do backoff:
+do processamento, seção 9) e redrive para a DLQ FIFO com `maxReceiveCount` 10. As filas de
+transações e de eventos usam o **FIFO de alta vazão** (`FifoThroughputLimit=perMessageQueueId` com
+`DeduplicationScope=messageGroup`): o teto passa de ~300 msg/s (3.000/s em lote) para até 9.000/s
+em lote, sem perder a ordem por grupo de mensagem (a wallet). A deduplicação por grupo é segura
+porque toda mensagem leva um `MessageDeduplicationId` único (`messageId` na entrada, `eventId` nos
+eventos); a DLQ permanece FIFO padrão. O `maxReceiveCount` 10 vem do backoff:
 somando as esperas (1 + 2 + … + 256 + 300 s, até ~13 min, menos com o jitter) e o tempo de cada
 tentativa, uma mensagem saudável aguenta uma falha transitória contínua (banco fora, por exemplo)
 da ordem de 10 min antes de ir para a DLQ; com 5, cerca de 30 s de falha já bastariam.
@@ -923,7 +928,9 @@ são sequenciais, então a vazão é limitada pela latência (carga em laço fec
 laço aberto, com taxa fixa, mediria melhor o ponto de saturação. O tráfego é sintético: 12%
 de replays, 3% de saldo insuficiente e 5 wallets quentes são escolhas do experimento, não
 um perfil real. A prova de corretude, ao contrário, não depende da máquina: vale para qualquer
-vazão.
+vazão. As filas já usam FIFO de alta vazão (seção 12), então o teto do SQS não é o limitante aqui;
+o LocalStack, de qualquer forma, não impõe os limites de vazão da AWS, então essa mudança não
+altera o resultado local — ela afasta o limite do serviço em produção.
 
 **Como reproduzir.** Ver "Teste de carga" no README.
 

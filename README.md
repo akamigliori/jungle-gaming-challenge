@@ -175,7 +175,9 @@ A tabela completa, enunciado → teste, está em
 ## Mensageria
 
 O consumer lê `wager-transactions.fifo` e chama o mesmo caso de uso do HTTP. O `MessageGroupId` é a
-wallet, então a ordem por wallet se mantém entre laços e entre instâncias.
+wallet, então a ordem por wallet se mantém entre laços e entre instâncias. As filas de transações e
+de eventos usam FIFO de alta vazão (`FifoThroughputLimit=perMessageQueueId`,
+`DeduplicationScope=messageGroup`); a DLQ permanece FIFO padrão.
 
 | O que aconteceu com a mensagem                                                   | O que o consumer faz                                                                              |
 | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
