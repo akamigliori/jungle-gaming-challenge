@@ -428,7 +428,7 @@ da transação: o envio só acontece depois, a partir do que já está confirmad
 `PublishOutboxUseCase.runOnce()` a cada `OUTBOX_POLL_INTERVAL_MS` (250 ms). Um ciclo:
 1. **Reserva** (transação curta e própria):
    `SELECT ... FROM outbox_messages o WHERE published_at IS NULL AND next_attempt_at <= $agora
-   AND NOT EXISTS (versão menor da mesma wallet ainda não publicada) ORDER BY occurred_at, id
+   AND NOT EXISTS (versão menor da mesma wallet ainda não publicada) ORDER BY next_attempt_at, id
    LIMIT $lote FOR UPDATE SKIP LOCKED` e, na mesma transação, `next_attempt_at = $agora + lease`
    (30 s) para as linhas escolhidas; `COMMIT`. O `NOT EXISTS` é a cabeça por wallet da seção
    "Ordem estrita por wallet".

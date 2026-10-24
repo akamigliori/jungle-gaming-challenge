@@ -28,6 +28,10 @@ export class MikroOrmOutboxRepository implements OutboxRepository {
    * elegível quando nenhuma versão anterior da mesma wallet ainda está não publicada. Enquanto a
    * cabeça (menor `wallet_version`) está em voo — mesmo travada por outra instância —, as versões
    * seguintes não aparecem para ninguém, então nenhum publisher as ultrapassa.
+   *
+   * A ordem por `next_attempt_at` (em vez de `occurred_at`) usa o índice parcial
+   * `outbox_unpublished_idx` e evita ordenar todo o backlog pendente a cada ciclo; como a ordem
+   * por wallet já vem do `NOT EXISTS`, `occurred_at` é redundante aqui.
    */
   async claimDue({ now, limit, leaseMs }: ClaimDueParams): Promise<OutboxMessage[]> {
     const leaseUntil = new Date(now.getTime() + leaseMs);
@@ -44,7 +48,7 @@ export class MikroOrmOutboxRepository implements OutboxRepository {
                 AND o.wallet_version IS NOT NULL
                 AND prev.wallet_version < o.wallet_version
             )
-          ORDER BY o.occurred_at, o.id
+          ORDER BY o.next_attempt_at, o.id
           LIMIT ?
             FOR UPDATE SKIP LOCKED`,
         [now, limit],
