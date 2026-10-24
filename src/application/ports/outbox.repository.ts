@@ -29,6 +29,13 @@ export interface OutboxRepository {
    * altera nada.
    */
   reschedule(message: OutboxMessage, p: { error: string; claimedUntil: Date }): Promise<void>;
+
+  /**
+   * Apaga até `limit` eventos já publicados e com `published_at` anterior a `cutoff`, do mais
+   * antigo para o mais novo. Devolve quantos apagou. Apagar uma linha publicada não afeta a
+   * entrega (o publisher só enxerga `published_at IS NULL`).
+   */
+  deletePublishedOlderThan(cutoff: Date, limit: number): Promise<number>;
 }
 
 export const OUTBOX_REPOSITORY = Symbol('OUTBOX_REPOSITORY');
