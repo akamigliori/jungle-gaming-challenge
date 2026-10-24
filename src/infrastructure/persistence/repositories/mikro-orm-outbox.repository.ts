@@ -23,15 +23,28 @@ export class MikroOrmOutboxRepository implements OutboxRepository {
    * `FOR UPDATE SKIP LOCKED`: duas instâncias reservando ao mesmo tempo nunca pegam a mesma
    * linha (uma pula as que a outra travou). No mesmo `COMMIT`, o `next_attempt_at` vai para
    * `now + lease`, o que tira o lote da consulta das demais sem precisar de coluna de dono.
+   *
+   * O filtro `NOT EXISTS` garante a ordem estrita por wallet: um `WalletBalanceChanged` só é
+   * elegível quando nenhuma versão anterior da mesma wallet ainda está não publicada. Enquanto a
+   * cabeça (menor `wallet_version`) está em voo — mesmo travada por outra instância —, as versões
+   * seguintes não aparecem para ninguém, então nenhum publisher as ultrapassa.
    */
   async claimDue({ now, limit, leaseMs }: ClaimDueParams): Promise<OutboxMessage[]> {
     const leaseUntil = new Date(now.getTime() + leaseMs);
     const rows = await this.em.transactional(async (em) => {
       const due = await em.execute<OutboxRow[]>(
-        `SELECT id, aggregate_id, event_type, payload, occurred_at, attempts
-           FROM outbox_messages
-          WHERE published_at IS NULL AND next_attempt_at <= ?
-          ORDER BY occurred_at, id
+        `SELECT id, aggregate_id, event_type, payload, occurred_at, attempts, wallet_version
+           FROM outbox_messages o
+          WHERE o.published_at IS NULL AND o.next_attempt_at <= ?
+            AND NOT EXISTS (
+              SELECT 1 FROM outbox_messages prev
+              WHERE prev.aggregate_id = o.aggregate_id
+                AND prev.published_at IS NULL
+                AND prev.wallet_version IS NOT NULL
+                AND o.wallet_version IS NOT NULL
+                AND prev.wallet_version < o.wallet_version
+            )
+          ORDER BY o.occurred_at, o.id
           LIMIT ?
             FOR UPDATE SKIP LOCKED`,
         [now, limit],
@@ -99,6 +112,7 @@ interface OutboxRow {
   payload: Record<string, unknown>;
   occurred_at: string | Date;
   attempts: number;
+  wallet_version: number | null;
 }
 
 function toDomain(row: OutboxRow, nextAttemptAt: Date): OutboxMessage {
@@ -110,6 +124,7 @@ function toDomain(row: OutboxRow, nextAttemptAt: Date): OutboxMessage {
     occurredAt: new Date(row.occurred_at),
     attempts: row.attempts,
     nextAttemptAt,
+    walletVersion: row.wallet_version ?? undefined,
   });
 }
 
@@ -124,5 +139,6 @@ function toRecord(message: OutboxMessage): OutboxRecord {
     nextAttemptAt: message.nextAttemptAt ?? message.occurredAt,
     publishedAt: message.publishedAt ?? null,
     lastError: null,
+    walletVersion: message.walletVersion ?? null,
   };
 }

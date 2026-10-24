@@ -53,6 +53,12 @@ describe('OutboxMessage', () => {
     expect(msg.isDue(occurredAt)).toBe(true);
   });
 
+  test('enqueue with a walletVersion stores it; without, it stays undefined', () => {
+    const event = makeEvent();
+    expect(OutboxMessage.enqueue(event, 2).walletVersion).toBe(2);
+    expect(OutboxMessage.enqueue(event).walletVersion).toBeUndefined();
+  });
+
   test('scheduleRetry with random=()=>1 -> delays 1s, 2s, 4s ... capped at 300s', () => {
     const msg = OutboxMessage.enqueue(makeEvent());
     const now = new Date('2026-10-20T13:00:00Z');
@@ -113,6 +119,12 @@ describe('OutboxMessage.rehydrate / markPublished', () => {
     expect(msg.isPending()).toBe(true);
     expect(msg.isDue(new Date('2026-10-20T12:04:59Z'))).toBe(false);
     expect(msg.isDue(new Date('2026-10-20T12:05:00Z'))).toBe(true);
+  });
+
+  test('rehydrate keeps the persisted walletVersion', () => {
+    const msg = OutboxMessage.rehydrate({ ...state, walletVersion: 3 });
+    expect(msg.walletVersion).toBe(3);
+    expect(OutboxMessage.rehydrate(state).walletVersion).toBeUndefined();
   });
 
   test('rehydrate of a published message -> not pending', () => {

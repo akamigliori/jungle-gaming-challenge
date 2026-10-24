@@ -443,6 +443,15 @@ describe('inbox/outbox', () => {
     );
     expect(msg).toContain('outbox_attempts_ck');
   });
+
+  test('outbox wallet_version zero → outbox_wallet_version_ck', async () => {
+    const msg = await failure(
+      `INSERT INTO outbox_messages (id, aggregate_id, event_type, payload, occurred_at, attempts, next_attempt_at, wallet_version)
+       VALUES (?, 'a', 'E', '{}', NOW(), 0, NOW(), 0)`,
+      [uuid()],
+    );
+    expect(msg).toContain('outbox_wallet_version_ck');
+  });
 });
 
 /** Monta o INSERT de wager_transactions para os casos que esperam falha. */

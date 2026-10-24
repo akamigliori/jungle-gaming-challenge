@@ -421,9 +421,11 @@ da transação: o envio só acontece depois, a partir do que já está confirmad
 **Publisher.** Cada instância roda um loop (`OutboxPublisherWorker`) que chama
 `PublishOutboxUseCase.runOnce()` a cada `OUTBOX_POLL_INTERVAL_MS` (250 ms). Um ciclo:
 1. **Reserva** (transação curta e própria):
-   `SELECT ... FROM outbox_messages WHERE published_at IS NULL AND next_attempt_at <= $agora
-   ORDER BY occurred_at, id LIMIT $lote FOR UPDATE SKIP LOCKED` e, na mesma transação,
-   `next_attempt_at = $agora + lease` (30 s) para as linhas escolhidas; `COMMIT`.
+   `SELECT ... FROM outbox_messages o WHERE published_at IS NULL AND next_attempt_at <= $agora
+   AND NOT EXISTS (versão menor da mesma wallet ainda não publicada) ORDER BY occurred_at, id
+   LIMIT $lote FOR UPDATE SKIP LOCKED` e, na mesma transação, `next_attempt_at = $agora + lease`
+   (30 s) para as linhas escolhidas; `COMMIT`. O `NOT EXISTS` é a cabeça por wallet da seção
+   "Ordem estrita por wallet".
 2. **Publica** fora de qualquer transação, em `wagering-events.fifo`, com
    `MessageGroupId = aggregateId` (a wallet) e `MessageDeduplicationId = eventId`; o corpo é o
    envelope JSON gravado no `payload`. Eventos da mesma wallet saem um de cada vez, na ordem do
@@ -476,19 +478,22 @@ cobrem: publicação única e marcação; segunda execução não republica; fal
 a wallet no ciclo e publicando-a em ordem no seguinte; falha atrasada que não sobrescreve a reserva
 de outra instância; dois
 publishers concorrentes sobre 100 eventos (todos recebidos, cada linha reservada por um único
-publisher, nenhuma pendente); reserva abandonada não é pega antes do lease e é publicada depois; e
+publisher, nenhuma pendente); reserva abandonada não é pega antes do lease e é publicada depois; a
+cabeça por wallet (a v2 não é reivindicada antes de a v1 publicar) e a ordem estrita por
+`wallet_version` mesmo com `occurred_at` fora de ordem; e
 o worker ligado publicando os eventos de uma wallet nova de ponta a ponta. Os testes controlam o
 relógio (`Clock` injetado) para avançar além do lease sem esperar.
 
-**Ordem: melhor esforço.** Dentro de um ciclo, eventos da mesma wallet saem na ordem gravada, e o
-`MessageGroupId` por wallet mantém essa ordem dentro da fila FIFO. Dentro de um mesmo lote, uma
-falha adia o evento que falhou e os seguintes da mesma wallet, que voltam juntos no ciclo seguinte.
-Mas um evento posterior da mesma wallet (gravado depois da falha, ou fora do `LIMIT` do lote) pode
-ser publicado no ciclo seguinte antes do que falhou, que ainda espera o backoff. Com vários
-publishers, eventos da mesma wallet também podem sair fora de ordem (dois lotes da mesma
-wallet reservados por instâncias diferentes; um lease vencido no meio de um envio lento). Por isso
-`WalletBalanceChanged` carrega `walletVersion`, que o consumidor usa para ordenar ou descartar
-eventos antigos. A garantia final de ordem é o `wallet_version` do ledger, não a fila.
+**Ordem estrita por wallet.** A coluna `wallet_version` da outbox (preenchida só em
+`WalletBalanceChanged`, com a versão do lançamento) e o filtro de "cabeça" no `claimDue` garantem
+que o evento de saldo de uma wallet só sai quando nenhuma versão anterior daquela wallet ainda está
+não publicada: um `NOT EXISTS` de versão menor pendente, somado ao `FOR UPDATE SKIP LOCKED`, faz
+nenhum publisher reivindicar a v2 enquanto a v1 está em voo — mesmo travada por outra instância. A
+ordem deixa de depender de `occurred_at` (relógio de parede, sujeito a skew entre instâncias) e do
+acaso da divisão entre publishers: ela é garantida no banco, e o `MessageGroupId` por wallet a
+preserva dentro da fila FIFO. Eventos de transação (`wallet_version NULL`) não têm versão e seguem
+melhor-esforço, como antes; o consumidor que precisa de ordem de saldo usa o `walletVersion` do
+payload como referência. O índice parcial `outbox_balance_unpublished_idx` serve o filtro de cabeça.
 
 ## 12. Consumo por SQS
 
@@ -1045,8 +1050,6 @@ diz o que custaria e como entraria.
 
 - **Alertas** sobre as métricas já expostas (outbox lag crescendo, `wagering_dlq_messages_total`
   subindo, conflitos de lock) e um dashboard: hoje só há o endpoint de coleta.
-- **Ordem estrita de eventos por wallet**: publicar por agregado em ordem de `wallet_version`
-  (coluna de sequência na outbox e claim por agregado), em vez do melhor esforço atual.
 - **Usuário de banco só com DML** para a aplicação (`SELECT`, `INSERT`, `UPDATE`), sem `TRUNCATE`
   nem DDL; as migrations rodam com outro usuário.
 - **Publicar a outbox em lote** (`SendMessageBatch`) e perfilar o publisher: é o gargalo

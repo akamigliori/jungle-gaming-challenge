@@ -11,6 +11,7 @@ export interface OutboxRecord {
   nextAttemptAt: Date;
   publishedAt: Date | null;
   lastError: string | null;
+  walletVersion: number | null;
 }
 
 export const OutboxSchema = new EntitySchema<OutboxRecord>({
@@ -26,5 +27,6 @@ export const OutboxSchema = new EntitySchema<OutboxRecord>({
     nextAttemptAt: { type: 'Date', columnType: 'timestamptz' },
     publishedAt: { type: 'Date', columnType: 'timestamptz', nullable: true },
     lastError: { type: 'string', nullable: true },
+    walletVersion: { type: 'integer', nullable: true },
   },
 });
