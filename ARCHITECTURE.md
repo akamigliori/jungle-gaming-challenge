@@ -149,6 +149,12 @@ chega ao banco: `Money.add` lança erro de domínio e, num crédito, a transaç�
   acumular mudanças para um `flush` no fim. A ordem dos comandos fica explícita no caso de uso
   (wallet → transação → ledger → outbox), as violações de constraint aparecem no ponto exato em
   que acontecem e não há unit of work implícito para depurar.
+- **Integridade do ledger no schema.** Além da FK de `transaction_id`, o trigger
+  `ledger_wallet_matches_transaction` rejeita (BEFORE INSERT) um lançamento cujo par
+  `(transaction_id, wallet_id)` não exista em `wager_transactions` — isto é, cuja wallet difere da
+  wallet da transação referenciada. A alternativa declarativa (FK composta) exigiria um
+  `UNIQUE (id, wallet_id)` redundante em `wager_transactions`; o trigger dá a mesma garantia sem
+  índice a mais na tabela mais quente do fluxo.
 - **`POST /wallets`**: numa única transação, insere a wallet e, se o saldo inicial for positivo, a
   transação interna `OPENING` já `PROCESSED`, o lançamento `CREDIT` (versão 1) e os eventos
   `WagerTransactionProcessed` e `WalletBalanceChanged` na outbox. Saldo zero grava só a wallet
@@ -926,7 +932,7 @@ aparece). Formato: decisão, alternativas consideradas e motivo.
 | `CHECK` `wager_tx_reversal_resolved_ck`: `REFUND`/`ROLLBACK` `PROCESSED` exige `reference_transaction_id`                                                                                                                             | confiar só no processador; `UNIQUE NULLS NOT DISTINCT` | o índice parcial `wager_tx_single_reversal_uq` não enxerga `NULL`, então uma reversão processada sem referência escaparia de "uma reversão por referência"; `NULLS NOT DISTINCT` faria todas as reversões sem referência colidirem entre si |
 | `CHECK` baratos: snapshot de `PROCESSED`, referência diferente da própria linha, versões ≥ 1, contadores ≥ 0                                                                                                                          | validar só no domínio                                  | custo zero em runtime e invariantes no schema, como o enunciado pede                                                                                                                                                                        |
 | Colunas de resultado da transação (`status`, `failure_code`, `balance_after`, `wallet_version_after`, `processed_at`, `reference_*`, `updated_at`) mutáveis; identidade, valores, `payload_hash` e `created_at` imutáveis por trigger | tabela de transação toda imutável                      | a transação nasce pendente e recebe o resultado depois; o que identifica e o que foi pedido nunca muda                                                                                                                                      |
-| Sem FK composta `(transaction_id, wallet_id)` do ledger para `wager_transactions`                                                                                                                                                     | adicioná-la                                            | exigiria um `UNIQUE` extra em `wager_transactions`; o caso de uso grava os dois com o mesmo `walletId` e a reconciliação detectaria a divergência                                                                                           |
+| Trigger `ledger_wallet_matches_transaction` garante que o lançamento aponta para uma transação da mesma wallet                                                                                                                        | FK composta `(transaction_id, wallet_id)`              | a FK composta exigiria um `UNIQUE (id, wallet_id)` redundante em `wager_transactions`; o trigger dá a mesma garantia com um `SELECT` por insert de ledger, sem índice a mais                                                                |
 | Migrations por script próprio (`scripts/migrate.ts`, Migrator do MikroORM)                                                                                                                                                            | CLI do MikroORM                                        | funciona com Bun sem ts-node; `down` reverte a última migration                                                                                                                                                                             |
 | Migrations ficam imutáveis depois de aplicadas; mudança de schema é migration nova e reversível                                                                                                                                       | editar a inicial                                       | bancos já migrados não divergem do código                                                                                                                                                                                                   |
 
@@ -984,8 +990,6 @@ diz o que custaria e como entraria.
 - A chave de idempotência e o `externalTransactionId` são independentes: reenviar a mesma operação
   de negócio com uma chave nova e o mesmo `externalTransactionId` é `409 IDEMPOTENCY_CONFLICT`, e o
   provedor corrige usando um `externalTransactionId` novo.
-- O ledger não tem FK composta `(transaction_id, wallet_id)`: a coerência entre a wallet do
-  lançamento e a da transação depende do caso de uso e é conferida pela reconciliação (seção 15).
 - Uma pendência cuja reavaliação falha sempre com um erro não transitório (um bug) é tentada de
   novo a cada lease (`PENDING_REFERENCE_LEASE_MS`, 30 s por padrão) e logada a cada vez; `reference_attempts` não cresce, então ela não
   chega à rejeição sozinha.
@@ -1044,5 +1048,3 @@ diz o que custaria e como entraria.
   observado no teste de carga (seção 16). Junto, uma métrica de espera por conexão do pool para
   decidir o tamanho dele (hoje 10 por instância).
 - **Retenção da outbox**: job que apaga as linhas já publicadas depois de um prazo.
-- **FK composta no ledger** `(transaction_id, wallet_id)` para `wager_transactions`, o que exige
-  um `UNIQUE (id, wallet_id)` extra nessa tabela.
