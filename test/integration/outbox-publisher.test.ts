@@ -215,6 +215,65 @@ describe('outbox publisher', () => {
     expect(row?.last_error).toBeNull();
   });
 
+  test('a wallet with an unpublished balance event only claims its head (lowest wallet_version)', async () => {
+    const clock = new FakeClock(new Date());
+    const now = clock.now();
+    const walletId = crypto.randomUUID();
+    const v1 = crypto.randomUUID();
+    const v2 = crypto.randomUUID();
+    const insert = (id: string, version: number) =>
+      sql(
+        `INSERT INTO outbox_messages (id, aggregate_id, event_type, payload, occurred_at, attempts, next_attempt_at, wallet_version)
+         VALUES (?, ?, 'WalletBalanceChanged', '{}'::JSONB, ?, 0, ?, ?)`,
+        [id, walletId, now, now, version],
+      );
+    await insert(v1, 1);
+    await insert(v2, 2);
+
+    const first = await outbox.claimDue({ now, limit: 10, leaseMs: LEASE_MS });
+    expect(first.map((m) => m.id)).toEqual([v1]);
+    expect(first[0]?.walletVersion).toBe(1);
+
+    await outbox.markPublished(v1, now);
+    const second = await outbox.claimDue({ now, limit: 10, leaseMs: LEASE_MS });
+    expect(second.map((m) => m.id)).toEqual([v2]);
+    expect(second[0]?.walletVersion).toBe(2);
+  });
+
+  test('publishes balance events in wallet_version order even when occurred_at is out of order', async () => {
+    const clock = new FakeClock(new Date());
+    const base = clock.now().getTime();
+    const walletId = crypto.randomUUID();
+    // ocorre fora de ordem: v1 com occurred_at mais novo, v3 com o mais antigo — só a versão ordena
+    const seeds = [
+      { version: 1, occurredAt: new Date(base - 1000) },
+      { version: 2, occurredAt: new Date(base - 2000) },
+      { version: 3, occurredAt: new Date(base - 3000) },
+    ];
+    for (const s of seeds) {
+      const id = crypto.randomUUID();
+      const payload = {
+        eventId: id,
+        eventType: 'WalletBalanceChanged',
+        aggregateId: walletId,
+        correlationId: 'c1',
+        occurredAt: s.occurredAt.toISOString(),
+        version: 1,
+        data: { walletId, walletVersion: s.version },
+      };
+      await sql(
+        `INSERT INTO outbox_messages (id, aggregate_id, event_type, payload, occurred_at, attempts, next_attempt_at, wallet_version)
+         VALUES (?, ?, 'WalletBalanceChanged', ?::JSONB, ?, 0, ?, ?)`,
+        [id, walletId, JSON.stringify(payload), s.occurredAt, clock.now(), s.version],
+      );
+    }
+
+    expect(await drain(newPublisher(clock))).toBe(3);
+    const received = await receiveEvents(3);
+    const versions = received.map((r) => (r.body.data as { walletVersion: number }).walletVersion);
+    expect(versions).toEqual([1, 2, 3]);
+  });
+
   test('a second run does not republish what was already published', async () => {
     const clock = new FakeClock(new Date());
     await seedOutbox(3, clock.now());
