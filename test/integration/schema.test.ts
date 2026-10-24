@@ -398,7 +398,7 @@ describe('wallet_ledger_entries', () => {
   });
 
   test('ledger wallet_id different from the transaction wallet → trigger error', async () => {
-    const { w, tx } = await seed();
+    const { tx } = await seed();
     const other = await insertWallet();
     await expect(insertLedger({ walletId: other, txId: tx })).rejects.toThrow(
       'must match the referenced transaction',

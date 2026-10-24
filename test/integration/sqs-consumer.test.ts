@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import {
-  DeleteMessageCommand,
+  DeleteMessageBatchCommand,
   type Message,
   ReceiveMessageCommand,
   type ReceiveMessageResult,
@@ -316,7 +316,7 @@ function interceptLock(
     });
 }
 
-/** Cliente SQS real que finge confirmar o `DeleteMessage`: simula a morte entre COMMIT e ack. */
+/** Cliente SQS real que finge confirmar o `DeleteMessageBatch`: simula a morte entre COMMIT e ack. */
 const swallowDeletes: OverrideProviders = (builder) =>
   builder.overrideProvider(SQS_CLIENT).useFactory({
     inject: [APP_CONFIG],
@@ -326,7 +326,7 @@ const swallowDeletes: OverrideProviders = (builder) =>
         get(target, property) {
           if (property !== 'send') return Reflect.get(target, property, target);
           return (command: unknown, options?: unknown) =>
-            command instanceof DeleteMessageCommand
+            command instanceof DeleteMessageBatchCommand
               ? Promise.resolve({})
               : (target.send as (c: unknown, o?: unknown) => Promise<unknown>)(command, options);
         },
@@ -365,6 +365,33 @@ function observeReceives() {
       },
     });
   return { overrides, firstReceive: firstReceive.promise, state };
+}
+
+/** Conta as chamadas de `DeleteMessageBatch` e o total de entradas apagadas. */
+function countDeleteBatches() {
+  const state = { calls: 0, entries: 0 };
+  const overrides: OverrideProviders = (builder) =>
+    builder.overrideProvider(SQS_CLIENT).useFactory({
+      inject: [APP_CONFIG],
+      factory: (config: AppConfig): SQSClient => {
+        const sqs = createSqsClient(config);
+        const send = sqs.send.bind(sqs) as (c: unknown, o?: unknown) => Promise<unknown>;
+        return new Proxy(sqs, {
+          get(target, property) {
+            if (property !== 'send') return Reflect.get(target, property, target);
+            return async (command: unknown, options?: unknown) => {
+              const result = await send(command, options);
+              if (command instanceof DeleteMessageBatchCommand) {
+                state.calls += 1;
+                state.entries += (command.input.Entries as unknown[] | undefined)?.length ?? 0;
+              }
+              return result;
+            };
+          },
+        });
+      },
+    });
+  return { overrides, state };
 }
 
 /** Resolve quando o Nest chama o `beforeApplicationShutdown` do consumer (depois de ele parar). */
@@ -621,5 +648,39 @@ describe('SQS consumer — order, retries, crash and shutdown', () => {
     await waitProcessed(data.externalTransactionId);
     await waitQueueEmpty(q);
     expect(await balanceOf(walletId)).toBe('75.00');
+  });
+
+  test('messages resolved in one poll are deleted in a single DeleteMessageBatch', async () => {
+    const q = await newQueues();
+    const counter = countDeleteBatches();
+    const bets = await Promise.all(
+      Array.from({ length: 3 }, async () => {
+        const walletId = await createWallet();
+        const data = betData(walletId);
+        await q.send(envelope(data), { groupId: walletId });
+        return data;
+      }),
+    );
+
+    // um único laço garante que as três mensagens chegam no mesmo lote de recebimento
+    const app = await createTestApp(
+      {
+        SQS_CONSUMER_ENABLED: 'true',
+        SQS_CONSUMER_LOOPS: '1',
+        SQS_TRANSACTIONS_QUEUE: q.transactions,
+        SQS_TRANSACTIONS_DLQ: q.transactionsDlq,
+        SQS_EVENTS_QUEUE: q.events,
+        SQS_WAIT_TIME_SECONDS: String(SHORT_WAIT_TIME_SECONDS),
+      },
+      counter.overrides,
+    );
+    apps.push(app);
+
+    for (const data of bets) await waitProcessed(data.externalTransactionId);
+    await waitQueueEmpty(q);
+
+    expect(counter.state.calls).toBe(1);
+    expect(counter.state.entries).toBe(3);
+    expect(await q.receiveAll('transactionsDlq')).toEqual([]);
   });
 });

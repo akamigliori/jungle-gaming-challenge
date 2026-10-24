@@ -508,7 +508,7 @@ se mantém entre laços e entre instâncias.
 
 | Classe            | Exemplos                                                                                                              | O que o consumer faz                                                           |
 | ----------------- | --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| Resultado gravado | `PROCESSED`, `REJECTED`, `PENDING_REFERENCE`, replay                                                                  | ack (`DeleteMessage`) depois do `COMMIT`                                       |
+| Resultado gravado | `PROCESSED`, `REJECTED`, `PENDING_REFERENCE`, replay                                                                  | ack em lote (`DeleteMessageBatch`) depois do `COMMIT`                          |
 | Permanente        | `INVALID_PAYLOAD` (JSON ou schema), `INVALID_MONEY`, `REFERENCE_REQUIRED`, `WALLET_NOT_FOUND`, `IDEMPOTENCY_CONFLICT` | DLQ explícita na primeira entrega                                              |
 | Transitório       | `TransientFailureError`: `lock_timeout`, deadlock, conexão, `statement_timeout`, depois dos 3 retries do caso de uso  | volta para a fila com backoff; o redrive leva para a DLQ depois de 10 entregas |
 | Inesperado        | qualquer outro erro (bug, `InvariantViolationError`)                                                                  | backoff nas 2 primeiras entregas; na 3ª, DLQ explícita com `INTERNAL_ERROR`    |
@@ -523,7 +523,7 @@ atraso nunca muda o resultado.
 
 **DLQ explícita.** `SendMessage` na DLQ com o mesmo corpo, o `MessageGroupId` original,
 `MessageDeduplicationId` = `MessageId` do SQS e os atributos `failureCode` e `failedAt`; só depois
-o `DeleteMessage` na fila principal. Se o processo morrer entre os dois, a mensagem volta, falha de
+o ack (em lote) na fila principal. Se o processo morrer entre os dois, a mensagem volta, falha de
 novo e o reenvio para a DLQ é descartado pela deduplicação do SQS.
 
 **Backoff.** `ChangeMessageVisibility` com `min(1 s × 2^(entrega − 1), 300 s)` e _equal jitter_
@@ -539,11 +539,16 @@ a consulta de idempotência e vira replay; o mesmo `messageId` com outro `data` 
 `IDEMPOTENCY_CONFLICT` e vai para a DLQ. A mesma aposta enviada por HTTP e depois por SQS (mesma
 chave) gera uma única transação: a mensagem cai no replay e recebe ack.
 
-**Ack só depois do `COMMIT`.** Se a instância morre depois do `COMMIT` e antes do `DeleteMessage`,
-a mensagem reaparece depois do visibility timeout, outra instância a recebe, a inbox e a chave de
-idempotência fazem dela um replay e ela recebe ack: um lançamento no ledger, uma linha na inbox e
-nenhum evento duplicado na outbox. Se morre antes do `COMMIT`, o Postgres desfaz a transação e a
-mensagem é processada do zero na próxima entrega.
+**Ack em lote depois do `COMMIT`.** As mensagens resolvidas num lote de recebimento são apagadas
+juntas, no fim do lote, com `DeleteMessageBatch` (até o limite de 10 do SQS por chamada): o ack
+individual por mensagem vira uma chamada por lote, reduzindo chamadas ao SQS sob carga. Uma
+mensagem só entra no lote de ack depois que o caso de uso resolveu, nunca antes do `COMMIT`. Se a
+instância morre depois do `COMMIT` e antes do ack em lote, a mensagem reaparece depois do visibility
+timeout, outra instância a recebe, a inbox e a chave de idempotência fazem dela um replay e ela
+recebe ack: um lançamento no ledger, uma linha na inbox e nenhum evento duplicado na outbox. Se
+morre antes do `COMMIT`, o Postgres desfaz a transação e a mensagem é processada do zero na próxima
+entrega. Uma falha parcial do `DeleteMessageBatch` só é logada: as entradas não apagadas reaparecem
+depois do visibility timeout e são tratadas pela inbox.
 
 **Ordem FIFO.** No lote, os grupos (wallets) rodam em paralelo e as mensagens de um grupo, em
 sequência. A primeira mensagem do grupo que não sai da fila (transitório, inesperado antes da 3ª
@@ -607,8 +612,9 @@ da ordem de 10 min antes de ir para a DLQ; com 5, cerca de 30 s de falha já bas
 **Como é testado** (`test/integration/sqs-consumer.test.ts`, Postgres e LocalStack reais, filas
 próprias da suíte com visibility de 2 s e `maxReceiveCount` 3). Falhas são simuladas trocando um
 provider da aplicação (repositório de wallet que lança ou demora, cliente SQS que engole o
-`DeleteMessage`), nunca com mocks de banco ou fila. Casos: mensagem válida processada e confirmada;
-reentrega com o mesmo `messageId` (um débito, duas confirmações); mesmo `messageId` com outro corpo
+`DeleteMessageBatch`), nunca com mocks de banco ou fila. Casos: mensagem válida processada e
+confirmada; várias mensagens do mesmo lote apagadas num único `DeleteMessageBatch`; reentrega com o
+mesmo `messageId` (um débito, duas confirmações); mesmo `messageId` com outro corpo
 na DLQ como `IDEMPOTENCY_CONFLICT`; JSON quebrado, valor numérico e wallet inexistente na DLQ na
 primeira entrega; a mesma aposta por HTTP e por SQS; a ordem FIFO descrita acima; transitório que
 se resolve na 3ª entrega, sem DLQ; erro inesperado na DLQ como `INTERNAL_ERROR`, recebido
@@ -1041,7 +1047,6 @@ diz o que custaria e como entraria.
   subindo, conflitos de lock) e um dashboard: hoje só há o endpoint de coleta.
 - **Ordem estrita de eventos por wallet**: publicar por agregado em ordem de `wallet_version`
   (coluna de sequência na outbox e claim por agregado), em vez do melhor esforço atual.
-- **Ack em lote** (`DeleteMessageBatch`) no consumer, para reduzir chamadas ao SQS sob carga.
 - **Usuário de banco só com DML** para a aplicação (`SELECT`, `INSERT`, `UPDATE`), sem `TRUNCATE`
   nem DDL; as migrations rodam com outro usuário.
 - **Publicar a outbox em lote** (`SendMessageBatch`) e perfilar o publisher: é o gargalo
