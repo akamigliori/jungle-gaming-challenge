@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { CLOCK, type Clock } from './application/ports/clock';
 import { ID_GENERATOR, type IdGenerator } from './application/ports/id-generator';
+import { JOURNAL_REPOSITORY, type JournalRepository } from './application/ports/journal.repository';
 import { LEDGER_REPOSITORY, type LedgerRepository } from './application/ports/ledger.repository';
 import { METRICS, type Metrics } from './application/ports/metrics';
 import { OUTBOX_REPOSITORY, type OutboxRepository } from './application/ports/outbox.repository';
@@ -25,6 +26,7 @@ const USE_CASE_DEPS = [
   WALLET_REPOSITORY,
   WAGER_TRANSACTION_REPOSITORY,
   LEDGER_REPOSITORY,
+  JOURNAL_REPOSITORY,
   OUTBOX_REPOSITORY,
   ID_GENERATOR,
   CLOCK,
@@ -51,6 +53,7 @@ const USE_CASE_DEPS = [
         wallets: WalletRepository,
         transactions: WagerTransactionRepository,
         ledger: LedgerRepository,
+        journal: JournalRepository,
         outbox: OutboxRepository,
         ids: IdGenerator,
         clock: Clock,
@@ -60,6 +63,7 @@ const USE_CASE_DEPS = [
           wallets,
           transactions,
           ledger,
+          journal,
           outbox,
           ids,
           clock,

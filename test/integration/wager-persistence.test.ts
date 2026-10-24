@@ -1,5 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import type { MikroORM } from '@mikro-orm/postgresql';
+import type { JournalRepository } from '../../src/application/ports/journal.repository';
+import { JOURNAL_REPOSITORY } from '../../src/application/ports/journal.repository';
 import type { LedgerRepository } from '../../src/application/ports/ledger.repository';
 import { LEDGER_REPOSITORY } from '../../src/application/ports/ledger.repository';
 import type { TransactionRunner } from '../../src/application/ports/transaction-runner';
@@ -14,6 +16,8 @@ import { Money } from '../../src/domain/shared/money';
 import { WagerTransaction } from '../../src/domain/wager/wager-transaction';
 import { WagerTransactionKind } from '../../src/domain/wager/wager-transaction-kind';
 import { WagerTransactionStatus } from '../../src/domain/wager/wager-transaction-status';
+import { JournalEntry } from '../../src/domain/wallet/journal-entry';
+import { opposite } from '../../src/domain/wallet/ledger-direction';
 import { Wallet } from '../../src/domain/wallet/wallet';
 import { isTransientDbError } from '../../src/infrastructure/persistence/pg-errors';
 import { createTestApp, type TestApp } from './support/app';
@@ -30,6 +34,7 @@ let runner: TransactionRunner;
 let wallets: WalletRepository;
 let transactions: WagerTransactionRepository;
 let ledger: LedgerRepository;
+let journal: JournalRepository;
 
 const money = (amount: string) => Money.from({ amount, currency: CURRENCY });
 
@@ -70,6 +75,7 @@ beforeAll(async () => {
   wallets = t.app.get<WalletRepository>(WALLET_REPOSITORY);
   transactions = t.app.get<WagerTransactionRepository>(WAGER_TRANSACTION_REPOSITORY);
   ledger = t.app.get<LedgerRepository>(LEDGER_REPOSITORY);
+  journal = t.app.get<JournalRepository>(JOURNAL_REPOSITORY);
 });
 
 afterAll(async () => {
@@ -153,6 +159,16 @@ describe('WalletRepository.save', () => {
       await wallets.save(locked, expectedVersion);
       await transactions.add(win);
       await ledger.append(entry);
+      await journal.append(
+        JournalEntry.create({
+          id: Bun.randomUUIDv7(),
+          transactionId: win.id,
+          accountId: JournalEntry.accountId(win.providerId, entry.money.currency),
+          direction: opposite(entry.direction),
+          money: entry.money,
+          createdAt: at,
+        }),
+      );
     });
     const reloaded = await runner.run(() => wallets.findById(wallet.id));
     expect(reloaded?.balance.toJSON().amount).toBe('110.00');

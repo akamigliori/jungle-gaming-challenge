@@ -3,6 +3,10 @@ import type { MikroORM } from '@mikro-orm/postgresql';
 import { CLOCK, type Clock } from '../../src/application/ports/clock';
 import { ID_GENERATOR, type IdGenerator } from '../../src/application/ports/id-generator';
 import {
+  JOURNAL_REPOSITORY,
+  type JournalRepository,
+} from '../../src/application/ports/journal.repository';
+import {
   LEDGER_REPOSITORY,
   type LedgerRepository,
 } from '../../src/application/ports/ledger.repository';
@@ -360,6 +364,7 @@ describe('ResolvePendingReferenceUseCase', () => {
       wallets: t.app.get<WalletRepository>(WALLET_REPOSITORY),
       transactions: t.app.get<WagerTransactionRepository>(WAGER_TRANSACTION_REPOSITORY),
       ledger: t.app.get<LedgerRepository>(LEDGER_REPOSITORY),
+      journal: t.app.get<JournalRepository>(JOURNAL_REPOSITORY),
       outbox: t.app.get<OutboxRepository>(OUTBOX_REPOSITORY),
       ids: t.app.get<IdGenerator>(ID_GENERATOR),
       clock: t.app.get<Clock>(CLOCK),
