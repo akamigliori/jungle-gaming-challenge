@@ -6,7 +6,8 @@ export type ReconciliationIssue =
   | 'BALANCE_DIFFERS_FROM_LEDGER_SUM'
   | 'VERSION_DIFFERS_FROM_LEDGER'
   | 'LEDGER_CHAIN_BROKEN'
-  | 'LEDGER_VERSION_GAP';
+  | 'LEDGER_VERSION_GAP'
+  | 'DOUBLE_ENTRY_GAP';
 
 /**
  * Texto decimal assinado vindo de `NUMERIC`: pode ser negativo e nunca é usado em aritmética
@@ -46,6 +47,7 @@ export function findIssues(s: WalletLedgerSnapshot): ReconciliationIssue[] {
   }
   if (s.brokenLinks > 0) issues.push('LEDGER_CHAIN_BROKEN');
   if (s.versionGaps > 0) issues.push('LEDGER_VERSION_GAP');
+  if (s.journalGaps > 0) issues.push('DOUBLE_ENTRY_GAP');
   return issues;
 }
 

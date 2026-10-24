@@ -1,5 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import type { MikroORM } from '@mikro-orm/postgresql';
+import type { JournalRepository } from '../../src/application/ports/journal.repository';
+import { JOURNAL_REPOSITORY } from '../../src/application/ports/journal.repository';
 import type { LedgerRepository } from '../../src/application/ports/ledger.repository';
 import { LEDGER_REPOSITORY } from '../../src/application/ports/ledger.repository';
 import type { OutboxRepository } from '../../src/application/ports/outbox.repository';
@@ -14,6 +16,8 @@ import { computePayloadHash } from '../../src/application/wager/payload-hash';
 import { Money } from '../../src/domain/shared/money';
 import { WagerTransaction } from '../../src/domain/wager/wager-transaction';
 import { WagerTransactionKind } from '../../src/domain/wager/wager-transaction-kind';
+import { JournalEntry } from '../../src/domain/wallet/journal-entry';
+import { opposite } from '../../src/domain/wallet/ledger-direction';
 import { createTestApp, type TestApp } from './support/app';
 import { resetDb, withTestDb } from './support/db';
 import { assertLedgerInvariant } from './support/invariants';
@@ -180,6 +184,16 @@ describe('POST /wallets', () => {
       balance_before: '0.00',
       balance_after: '1000.00',
       wallet_version: 1,
+    });
+    // partida dobrada: a abertura credita a wallet e debita a conta da casa
+    const journal = await sql('SELECT * FROM journal_entries');
+    expect(journal).toHaveLength(1);
+    expect(journal[0]).toMatchObject({
+      transaction_id: txs[0]?.id,
+      account_id: 'house:internal:BRL',
+      direction: 'DEBIT',
+      amount: '1000.00',
+      currency: 'BRL',
     });
 
     const outbox = await sql<{ event_type: string; aggregate_id: string; payload: unknown }>(
@@ -352,6 +366,7 @@ describe('GET /wallets/:walletId/ledger', () => {
     const wallets = t.app.get<WalletRepository>(WALLET_REPOSITORY);
     const transactions = t.app.get<WagerTransactionRepository>(WAGER_TRANSACTION_REPOSITORY);
     const ledger = t.app.get<LedgerRepository>(LEDGER_REPOSITORY);
+    const journal = t.app.get<JournalRepository>(JOURNAL_REPOSITORY);
 
     await runner.run(async () => {
       const wallet = await wallets.lockById(walletId);
@@ -383,6 +398,16 @@ describe('GET /wallets/:walletId/ledger', () => {
         tx.markProcessed({ at, balanceAfter: wallet.balance, walletVersionAfter: wallet.version });
         await transactions.add(tx);
         await ledger.append(entry);
+        await journal.append(
+          JournalEntry.create({
+            id: Bun.randomUUIDv7(),
+            transactionId: tx.id,
+            accountId: JournalEntry.accountId(tx.providerId, entry.money.currency),
+            direction: opposite(entry.direction),
+            money: entry.money,
+            createdAt: at,
+          }),
+        );
       }
       await wallets.save(wallet, expectedVersion);
     });

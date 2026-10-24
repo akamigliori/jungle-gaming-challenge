@@ -9,10 +9,13 @@ import {
   WagerTransaction,
 } from '../../domain/wager/wager-transaction';
 import { WagerTransactionKind } from '../../domain/wager/wager-transaction-kind';
+import { JournalEntry } from '../../domain/wallet/journal-entry';
+import { opposite } from '../../domain/wallet/ledger-direction';
 import { Wallet } from '../../domain/wallet/wallet';
 import type { WalletLedgerEntry } from '../../domain/wallet/wallet-ledger-entry';
 import type { Clock } from '../ports/clock';
 import type { IdGenerator } from '../ports/id-generator';
+import type { JournalRepository } from '../ports/journal.repository';
 import type { LedgerRepository } from '../ports/ledger.repository';
 import type { OutboxRepository } from '../ports/outbox.repository';
 import type { TransactionRunner } from '../ports/transaction-runner';
@@ -31,6 +34,7 @@ export interface CreateWalletDeps {
   wallets: WalletRepository;
   transactions: WagerTransactionRepository;
   ledger: LedgerRepository;
+  journal: JournalRepository;
   outbox: OutboxRepository;
   ids: IdGenerator;
   clock: Clock;
@@ -72,7 +76,7 @@ export class CreateWalletUseCase {
     correlationId: string,
     at: Date,
   ): Promise<void> {
-    const { transactions, ledger, outbox, ids } = this.deps;
+    const { transactions, ledger, journal, outbox, ids } = this.deps;
     const payloadHash = computePayloadHash({
       providerId: OPENING_PROVIDER_ID,
       externalTransactionId: wallet.id,
@@ -95,6 +99,17 @@ export class CreateWalletUseCase {
 
     await transactions.add(opening);
     await ledger.append(entry);
+    // contrapartida da casa: a abertura credita a wallet e debita a conta da casa
+    await journal.append(
+      JournalEntry.create({
+        id: ids.next(),
+        transactionId: entry.transactionId,
+        accountId: JournalEntry.accountId(OPENING_PROVIDER_ID, entry.money.currency),
+        direction: opposite(entry.direction),
+        money: entry.money,
+        createdAt: at,
+      }),
+    );
 
     const context = () => ({ eventId: ids.next(), correlationId, occurredAt: at });
     await outbox.enqueue(OutboxMessage.enqueue(WagerTransactionProcessed.from(opening, context())));

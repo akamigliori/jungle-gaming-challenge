@@ -9,6 +9,7 @@ import { WagerTransactionStatus } from '../../domain/wager/wager-transaction-sta
 import type { Clock } from '../ports/clock';
 import type { IdGenerator } from '../ports/id-generator';
 import type { InboxReceipt, InboxRepository } from '../ports/inbox.repository';
+import type { JournalRepository } from '../ports/journal.repository';
 import type { LedgerRepository } from '../ports/ledger.repository';
 import type { Metrics, ProcessingChannel, ProcessingOutcome } from '../ports/metrics';
 import type { OutboxRepository } from '../ports/outbox.repository';
@@ -49,6 +50,7 @@ export interface ProcessWagerDeps {
   wallets: WalletRepository;
   transactions: WagerTransactionRepository;
   ledger: LedgerRepository;
+  journal: JournalRepository;
   inbox: InboxRepository;
   outbox: OutboxRepository;
   ids: IdGenerator;

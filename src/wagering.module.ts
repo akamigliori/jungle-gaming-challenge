@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { CLOCK, type Clock } from './application/ports/clock';
 import { ID_GENERATOR, type IdGenerator } from './application/ports/id-generator';
 import { INBOX_REPOSITORY, type InboxRepository } from './application/ports/inbox.repository';
+import { JOURNAL_REPOSITORY, type JournalRepository } from './application/ports/journal.repository';
 import { LEDGER_REPOSITORY, type LedgerRepository } from './application/ports/ledger.repository';
 import { METRICS, type Metrics } from './application/ports/metrics';
 import { OUTBOX_REPOSITORY, type OutboxRepository } from './application/ports/outbox.repository';
@@ -38,6 +39,7 @@ import { WagerTransactionsConsumer } from './interfaces/sqs/wager-transactions.c
         WALLET_REPOSITORY,
         WAGER_TRANSACTION_REPOSITORY,
         LEDGER_REPOSITORY,
+        JOURNAL_REPOSITORY,
         INBOX_REPOSITORY,
         OUTBOX_REPOSITORY,
         ID_GENERATOR,
@@ -50,6 +52,7 @@ import { WagerTransactionsConsumer } from './interfaces/sqs/wager-transactions.c
         wallets: WalletRepository,
         transactions: WagerTransactionRepository,
         ledger: LedgerRepository,
+        journal: JournalRepository,
         inbox: InboxRepository,
         outbox: OutboxRepository,
         ids: IdGenerator,
@@ -62,6 +65,7 @@ import { WagerTransactionsConsumer } from './interfaces/sqs/wager-transactions.c
           wallets,
           transactions,
           ledger,
+          journal,
           inbox,
           outbox,
           ids,
@@ -79,6 +83,7 @@ import { WagerTransactionsConsumer } from './interfaces/sqs/wager-transactions.c
         WALLET_REPOSITORY,
         WAGER_TRANSACTION_REPOSITORY,
         LEDGER_REPOSITORY,
+        JOURNAL_REPOSITORY,
         OUTBOX_REPOSITORY,
         ID_GENERATOR,
         CLOCK,
@@ -90,6 +95,7 @@ import { WagerTransactionsConsumer } from './interfaces/sqs/wager-transactions.c
         wallets: WalletRepository,
         transactions: WagerTransactionRepository,
         ledger: LedgerRepository,
+        journal: JournalRepository,
         outbox: OutboxRepository,
         ids: IdGenerator,
         clock: Clock,
@@ -101,6 +107,7 @@ import { WagerTransactionsConsumer } from './interfaces/sqs/wager-transactions.c
           wallets,
           transactions,
           ledger,
+          journal,
           outbox,
           ids,
           clock,
