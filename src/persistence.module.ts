@@ -1,5 +1,6 @@
 import { Global, Module } from '@nestjs/common';
 import { INBOX_REPOSITORY } from './application/ports/inbox.repository';
+import { JOURNAL_REPOSITORY } from './application/ports/journal.repository';
 import { LEDGER_REPOSITORY } from './application/ports/ledger.repository';
 import { OUTBOX_REPOSITORY } from './application/ports/outbox.repository';
 import { TRANSACTION_RUNNER } from './application/ports/transaction-runner';
@@ -7,6 +8,7 @@ import { WAGER_TRANSACTION_REPOSITORY } from './application/ports/wager-transact
 import { WALLET_REPOSITORY } from './application/ports/wallet.repository';
 import { MikroOrmTransactionRunner } from './infrastructure/persistence/mikro-orm-transaction-runner';
 import { MikroOrmInboxRepository } from './infrastructure/persistence/repositories/mikro-orm-inbox.repository';
+import { MikroOrmJournalRepository } from './infrastructure/persistence/repositories/mikro-orm-journal.repository';
 import { MikroOrmLedgerRepository } from './infrastructure/persistence/repositories/mikro-orm-ledger.repository';
 import { MikroOrmOutboxRepository } from './infrastructure/persistence/repositories/mikro-orm-outbox.repository';
 import { MikroOrmWagerTransactionRepository } from './infrastructure/persistence/repositories/mikro-orm-wager-transaction.repository';
@@ -17,6 +19,7 @@ const PERSISTENCE_PROVIDERS = [
   { provide: WALLET_REPOSITORY, useClass: MikroOrmWalletRepository },
   { provide: WAGER_TRANSACTION_REPOSITORY, useClass: MikroOrmWagerTransactionRepository },
   { provide: LEDGER_REPOSITORY, useClass: MikroOrmLedgerRepository },
+  { provide: JOURNAL_REPOSITORY, useClass: MikroOrmJournalRepository },
   { provide: INBOX_REPOSITORY, useClass: MikroOrmInboxRepository },
   { provide: OUTBOX_REPOSITORY, useClass: MikroOrmOutboxRepository },
 ];
