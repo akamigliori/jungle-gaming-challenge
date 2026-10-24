@@ -51,12 +51,13 @@ export async function recordDecision(
   if (entry) await ledger.append(entry);
 
   const context = () => ({ eventId: ids.next(), correlationId: p.correlationId, occurredAt: p.at });
-  const enqueue = (event: IntegrationEvent<unknown>) =>
-    outbox.enqueue(OutboxMessage.enqueue(event));
+  const enqueue = (event: IntegrationEvent<unknown>, walletVersion?: number) =>
+    outbox.enqueue(OutboxMessage.enqueue(event, walletVersion));
   switch (decision.outcome) {
     case 'PROCESSED':
       await enqueue(WagerTransactionProcessed.from(tx, context()));
-      if (entry) await enqueue(WalletBalanceChanged.from(wallet, entry, context()));
+      if (entry)
+        await enqueue(WalletBalanceChanged.from(wallet, entry, context()), entry.walletVersion);
       break;
     case 'REJECTED':
       await enqueue(WagerTransactionRejected.from(tx, context()));
