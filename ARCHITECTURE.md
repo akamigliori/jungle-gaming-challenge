@@ -155,6 +155,12 @@ chega ao banco: `Money.add` lança erro de domínio e, num crédito, a transaç�
   wallet da transação referenciada. A alternativa declarativa (FK composta) exigiria um
   `UNIQUE (id, wallet_id)` redundante em `wager_transactions`; o trigger dá a mesma garantia sem
   índice a mais na tabela mais quente do fluxo.
+- **Partidas dobradas no schema.** Toda entrada de wallet tem uma contrapartida igual e oposta na
+  conta da casa (`journal_entries`, `account_id = house:{provider}:{currency}`), gravada na mesma
+  transação SQL. A soma-zero por transação é garantida pelo banco: o trigger
+  `journal_matches_wallet` (BEFORE INSERT) confere direção oposta + mesmo valor + mesma moeda, e o
+  constraint trigger deferido `wallet_requires_journal` exige a contrapartida no `COMMIT`. A casa
+  não tem saldo materializado (evita linha quente global): o saldo dela é `SUM` sob demanda.
 - **`POST /wallets`**: numa única transação, insere a wallet e, se o saldo inicial for positivo, a
   transação interna `OPENING` já `PROCESSED`, o lançamento `CREDIT` (versão 1) e os eventos
   `WagerTransactionProcessed` e `WalletBalanceChanged` na outbox. Saldo zero grava só a wallet
@@ -809,7 +815,8 @@ Com `AUTH_ENABLED=true`, as três `OIDC_*` são obrigatórias e validadas no boo
   `difference` é gravado menos calculado); a `version` da wallet é a maior `wallet_version` do ledger
   (`VERSION_DIFFERS_FROM_LEDGER`; sem lançamentos, a versão esperada é 1); cada `balance_before` é o
   `balance_after` do lançamento anterior, e o primeiro parte de zero (`LEDGER_CHAIN_BROKEN`); as
-  versões são contíguas (`LEDGER_VERSION_GAP`). Os códigos de `issues` são estáveis para o
+  versões são contíguas (`LEDGER_VERSION_GAP`); cada lançamento tem a contrapartida da casa
+  (`DOUBLE_ENTRY_GAP`). Os códigos de `issues` são estáveis para o
   consumidor decidir sem ler texto.
 
   A leitura é uma única instrução SQL, e no Postgres uma instrução enxerga um snapshot único
@@ -978,13 +985,12 @@ Prioridade do projeto: correção financeira, concorrência, idempotência e men
 opção mais simples quando houver dúvida. Estes itens foram avaliados e deixados de fora; cada um
 diz o que custaria e como entraria.
 
-| Item                                        | Por que ficou de fora                                                                                                                                                                  | Como entraria                                                                                |
-| ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| Ledger de partidas dobradas                 | diferencial opcional; o ledger de lançamento simples já é auditável e reconciliável, e um segundo lado de cada lançamento dobraria as escritas na transação mais disputada             | contas de contrapartida por moeda e uma restrição diferida que exija soma zero por transação |
-| Gateway na borda (limite de taxa, timeouts) | infraestrutura de implantação, fora do que o serviço garante; `lock_timeout` e `statement_timeout` já limitam quanto tempo uma requisição segura o banco                               | proxy reverso na frente das instâncias, com limite por IP e `/metrics` só na rede interna    |
-| Tracing distribuído e painéis               | o serviço expõe logs com ids, métricas Prometheus e health; tracing e painéis pesam numa máquina de 8 GB e não mudam a correção                                                        | coletor OTLP e um dashboard sobre as métricas já expostas (seção 19)                         |
-| Auditoria de submissões inválidas           | decisão da seção 4: o que falha antes de existir uma transação válida devolve o erro e fica em log e métrica (no SQS, vai para a DLQ com o código); só a rejeição de negócio é gravada | tabela própria de recusas, com retenção, fora da tabela de transações                        |
-| Lote por wallet no consumer                 | otimização de vazão; o gargalo medido no teste de carga é o publisher da outbox, não o consumer                                                                                        | seção 19                                                                                     |
+| Item                                        | Por que ficou de fora                                                                                                                                                                  | Como entraria                                                                             |
+| ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| Gateway na borda (limite de taxa, timeouts) | infraestrutura de implantação, fora do que o serviço garante; `lock_timeout` e `statement_timeout` já limitam quanto tempo uma requisição segura o banco                               | proxy reverso na frente das instâncias, com limite por IP e `/metrics` só na rede interna |
+| Tracing distribuído e painéis               | o serviço expõe logs com ids, métricas Prometheus e health; tracing e painéis pesam numa máquina de 8 GB e não mudam a correção                                                        | coletor OTLP e um dashboard sobre as métricas já expostas (seção 19)                      |
+| Auditoria de submissões inválidas           | decisão da seção 4: o que falha antes de existir uma transação válida devolve o erro e fica em log e métrica (no SQS, vai para a DLQ com o código); só a rejeição de negócio é gravada | tabela própria de recusas, com retenção, fora da tabela de transações                     |
+| Lote por wallet no consumer                 | otimização de vazão; o gargalo medido no teste de carga é o publisher da outbox, não o consumer                                                                                        | seção 19                                                                                  |
 
 ## 18. Limitações conhecidas
 
