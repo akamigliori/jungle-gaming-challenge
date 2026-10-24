@@ -22,6 +22,42 @@ describe('loadConfig outbox publisher', () => {
   });
 });
 
+describe('loadConfig outbox retention', () => {
+  test('defaults: enabled, 60 s poll, 7 days max age, batch of 1000', () => {
+    expect(loadConfig({}).outboxRetention).toEqual({
+      enabled: true,
+      pollIntervalMs: 60_000,
+      maxAgeMs: 7 * 86_400_000,
+      batchSize: 1000,
+    });
+  });
+
+  test('OUTBOX_RETENTION_ENABLED=false disables it (not coerced to true)', () => {
+    expect(loadConfig({ OUTBOX_RETENTION_ENABLED: 'false' }).outboxRetention.enabled).toBe(false);
+  });
+
+  test('values come from the environment', () => {
+    expect(
+      loadConfig({
+        OUTBOX_RETENTION_POLL_INTERVAL_MS: '100',
+        OUTBOX_RETENTION_MAX_AGE_MS: '3600000',
+        OUTBOX_RETENTION_BATCH_SIZE: '50',
+      }).outboxRetention,
+    ).toEqual({
+      enabled: true,
+      pollIntervalMs: 100,
+      maxAgeMs: 3_600_000,
+      batchSize: 50,
+    });
+  });
+
+  test('invalid values are rejected', () => {
+    expect(() => loadConfig({ OUTBOX_RETENTION_ENABLED: 'maybe' })).toThrow();
+    expect(() => loadConfig({ OUTBOX_RETENTION_MAX_AGE_MS: '0' })).toThrow();
+    expect(() => loadConfig({ OUTBOX_RETENTION_BATCH_SIZE: '-1' })).toThrow();
+  });
+});
+
 describe('loadConfig SQS queues', () => {
   test('defaults keep the current queue names', () => {
     expect(loadConfig({}).sqs.queues).toEqual({
