@@ -89,6 +89,26 @@ export class MikroOrmOutboxRepository implements OutboxRepository {
       ],
     );
   }
+
+  /**
+   * Deleção em lote, do mais antigo para o mais novo, dentro de uma transação curta: `LIMIT` no
+   * `IN` evita apagar muita coisa de uma vez e estourar o `statement_timeout`. Só toca linhas já
+   * publicadas (`published_at IS NOT NULL`), nunca eventos ainda em retry.
+   */
+  async deletePublishedOlderThan(cutoff: Date, limit: number): Promise<number> {
+    const deleted = await this.em.execute<{ id: string }[]>(
+      `DELETE FROM outbox_messages
+        WHERE id IN (
+          SELECT id FROM outbox_messages
+           WHERE published_at IS NOT NULL AND published_at < ?
+           ORDER BY published_at
+           LIMIT ?
+        )
+        RETURNING id`,
+      [cutoff, limit],
+    );
+    return deleted.length;
+  }
 }
 
 /** Linha crua do `SELECT`: o driver devolve `TIMESTAMPTZ` como texto em consultas SQL diretas. */

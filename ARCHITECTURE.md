@@ -501,6 +501,16 @@ preserva dentro da fila FIFO. Eventos de transação (`wallet_version NULL`) nã
 melhor-esforço, como antes; o consumidor que precisa de ordem de saldo usa o `walletVersion` do
 payload como referência. O índice parcial `outbox_balance_unpublished_idx` serve o filtro de cabeça.
 
+**Retenção.** Eventos já publicados ficam na tabela até o `OutboxRetentionWorker` apagá-los: a cada
+`OUTBOX_RETENTION_POLL_INTERVAL_MS` (60 s), um ciclo calcula o corte (`agora - maxAgeMs`, 7 dias por
+padrão) e apaga até `OUTBOX_RETENTION_BATCH_SIZE` linhas (1000) com `published_at < corte`, na ordem
+de publicação, com `DELETE ... WHERE id IN (SELECT ... LIMIT ...)` numa transação curta. A deleção
+nunca toca eventos ainda não publicados (o filtro é `published_at IS NOT NULL`), então não interfere
+na entrega nem no retry; e, como o publisher só enxerga `published_at IS NULL`, apagar uma linha
+publicada é inofensivo. Várias instâncias podem rodar juntas: cada `DELETE` é uma transação própria e
+uma linha apagada por uma não volta para as outras. O índice parcial `outbox_published_idx` serve a
+busca por `published_at`; o lote cheio encadeia o próximo ciclo na hora.
+
 ## 12. Consumo por SQS
 
 `WagerTransactionsConsumer` lê a fila FIFO `wager-transactions.fifo` e chama o mesmo
@@ -1025,7 +1035,9 @@ diz o que custaria e como entraria.
   da `BET` original, uma reversão pendente só estoura se um crédito grande entrar entre a `BET` e
   a resolução; esse caminho é coberto por teste unitário, não por integração, por depender dessa
   corrida.
-- As linhas publicadas da outbox nunca são removidas; falta um job de retenção.
+- As linhas publicadas da outbox são removidas pelo `OutboxRetentionWorker` (seção 11) depois de um
+  prazo configurável (`OUTBOX_RETENTION_MAX_AGE_MS`, 7 dias por padrão); enquanto o worker está
+  desligado ou o prazo não venceu, elas permanecem na tabela.
 - Um lote reservado é publicado em sequência por wallet; se o SQS ficar lento (no pior caso cerca
   de 2,5 s por envio: 1 s para abrir a conexão mais 1,5 s esperando a resposta) e uma wallet tiver
   muitos eventos no mesmo lote, o envio pode passar do lease e outra instância reservar as mesmas
@@ -1058,4 +1070,3 @@ diz o que custaria e como entraria.
   subindo, conflitos de lock) e um dashboard: hoje só há o endpoint de coleta.
 - **Usuário de banco só com DML** para a aplicação (`SELECT`, `INSERT`, `UPDATE`), sem `TRUNCATE`
   nem DDL; as migrations rodam com outro usuário.
-- **Retenção da outbox**: job que apaga as linhas já publicadas depois de um prazo.

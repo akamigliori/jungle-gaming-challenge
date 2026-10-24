@@ -64,6 +64,10 @@ class RecordingOutbox implements OutboxRepository {
       claimedUntil,
     });
   }
+
+  async deletePublishedOlderThan(): Promise<number> {
+    return 0;
+  }
 }
 
 function useCase(outbox: OutboxRepository, publisher: EventPublisher) {

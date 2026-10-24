@@ -54,6 +54,8 @@ export async function createTestApp(
     SQS_CONSUMER_ENABLED: 'false',
     // o worker resolveria pendências que as suítes conferem paradas; quem precisa liga
     PENDING_REFERENCE_WORKER_ENABLED: 'false',
+    // o worker apagaria eventos publicados que as suítes conferem; quem precisa liga
+    OUTBOX_RETENTION_ENABLED: 'false',
     ...overrides,
   });
   const app = overrideProviders
