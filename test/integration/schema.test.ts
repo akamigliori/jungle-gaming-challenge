@@ -68,23 +68,34 @@ async function insertLedger(o: {
   currency?: string;
 }): Promise<string> {
   const id = uuid();
-  await run(
-    `INSERT INTO wallet_ledger_entries
-       (id, wallet_id, transaction_id, direction, amount, currency, balance_before, balance_after,
-        wallet_version, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
-    [
-      id,
-      o.walletId,
-      o.txId,
-      o.direction ?? 'CREDIT',
-      o.amount ?? '10.00',
-      o.currency ?? 'BRL',
-      o.before ?? '0.00',
-      o.after ?? '10.00',
-      o.version ?? 1,
-    ],
-  );
+  const direction = o.direction ?? 'CREDIT';
+  const amount = o.amount ?? '10.00';
+  const currency = o.currency ?? 'BRL';
+  // ledger + contrapartida da casa na mesma transação, para o trigger deferido de partida dobrada
+  await orm.em.transactional(async (em) => {
+    await em.execute(
+      `INSERT INTO wallet_ledger_entries
+         (id, wallet_id, transaction_id, direction, amount, currency, balance_before, balance_after,
+          wallet_version, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+      [
+        id,
+        o.walletId,
+        o.txId,
+        direction,
+        amount,
+        currency,
+        o.before ?? '0.00',
+        o.after ?? '10.00',
+        o.version ?? 1,
+      ],
+    );
+    await em.execute(
+      `INSERT INTO journal_entries (id, transaction_id, account_id, direction, amount, currency, created_at)
+       VALUES (?, ?, 'house:test:BRL', ?, ?, ?, NOW())`,
+      [uuid(), o.txId, direction === 'DEBIT' ? 'CREDIT' : 'DEBIT', amount, currency],
+    );
+  });
   return id;
 }
 
@@ -424,6 +435,70 @@ describe('wallet_ledger_entries', () => {
     await expect(insertLedger({ walletId: w, txId: tx, version: 0 })).rejects.toThrow(
       'ledger_wallet_version_ck',
     );
+  });
+});
+
+describe('journal_entries', () => {
+  test('UPDATE and DELETE → append-only', async () => {
+    const w = await insertWallet();
+    const tx = await insertTx({ walletId: w, status: 'PROCESSED', processedAt: '2026-01-01' });
+    await insertLedger({
+      walletId: w,
+      txId: tx,
+      direction: 'DEBIT',
+      amount: '10.00',
+      before: '100.00',
+      after: '90.00',
+    });
+    const rows = (await run(`SELECT id FROM journal_entries WHERE transaction_id = ?`, [tx])) as {
+      id: string;
+    }[];
+    const id = rows[0]?.id;
+    expect(await failure(`UPDATE journal_entries SET amount = 1 WHERE id = ?`, [id])).toContain(
+      'append-only',
+    );
+    expect(await failure(`DELETE FROM journal_entries WHERE id = ?`, [id])).toContain(
+      'append-only',
+    );
+  });
+
+  test('journal without a wallet ledger entry → trigger error', async () => {
+    const w = await insertWallet();
+    const tx = await insertTx({ walletId: w, status: 'PROCESSED', processedAt: '2026-01-01' });
+    const msg = await failure(
+      `INSERT INTO journal_entries (id, transaction_id, account_id, direction, amount, currency, created_at)
+       VALUES (?, ?, 'house:p1:BRL', 'CREDIT', '10.00', 'BRL', NOW())`,
+      [uuid(), tx],
+    );
+    expect(msg).toContain('no matching wallet');
+  });
+
+  test('journal direction same as wallet → trigger error', async () => {
+    const w = await insertWallet();
+    const tx = await insertTx({ walletId: w, status: 'PROCESSED', processedAt: '2026-01-01' });
+    await expect(
+      orm.em.transactional(async (em) => {
+        await em.execute(
+          `INSERT INTO wallet_ledger_entries (id, wallet_id, transaction_id, direction, amount, currency, balance_before, balance_after, wallet_version, created_at) VALUES (?, ?, ?, 'DEBIT', '10.00', 'BRL', '100.00', '90.00', 2, NOW())`,
+          [uuid(), w, tx],
+        );
+        await em.execute(
+          `INSERT INTO journal_entries (id, transaction_id, account_id, direction, amount, currency, created_at) VALUES (?, ?, 'house:p1:BRL', 'DEBIT', '10.00', 'BRL', NOW())`,
+          [uuid(), tx],
+        );
+      }),
+    ).rejects.toThrow('opposite');
+  });
+
+  test('wallet entry without journal → deferred trigger at COMMIT', async () => {
+    const w = await insertWallet();
+    const tx = await insertTx({ walletId: w, status: 'PROCESSED', processedAt: '2026-01-01' });
+    await expect(
+      run(
+        `INSERT INTO wallet_ledger_entries (id, wallet_id, transaction_id, direction, amount, currency, balance_before, balance_after, wallet_version, created_at) VALUES (?, ?, ?, 'DEBIT', '10.00', 'BRL', '100.00', '90.00', 2, NOW())`,
+        [uuid(), w, tx],
+      ),
+    ).rejects.toThrow('no matching journal');
   });
 });
 
