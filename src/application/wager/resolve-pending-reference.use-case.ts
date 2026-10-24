@@ -5,6 +5,7 @@ import type { WagerTransaction } from '../../domain/wager/wager-transaction';
 import { WagerTransactionStatus } from '../../domain/wager/wager-transaction-status';
 import type { Clock } from '../ports/clock';
 import type { IdGenerator } from '../ports/id-generator';
+import type { JournalRepository } from '../ports/journal.repository';
 import type { LedgerRepository } from '../ports/ledger.repository';
 import type { Metrics, ProcessingOutcome } from '../ports/metrics';
 import type { OutboxRepository } from '../ports/outbox.repository';
@@ -20,6 +21,7 @@ export interface ResolvePendingReferenceDeps {
   wallets: WalletRepository;
   transactions: WagerTransactionRepository;
   ledger: LedgerRepository;
+  journal: JournalRepository;
   outbox: OutboxRepository;
   ids: IdGenerator;
   clock: Clock;

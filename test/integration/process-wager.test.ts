@@ -7,6 +7,10 @@ import {
   type InboxRepository,
 } from '../../src/application/ports/inbox.repository';
 import {
+  JOURNAL_REPOSITORY,
+  type JournalRepository,
+} from '../../src/application/ports/journal.repository';
+import {
   LEDGER_REPOSITORY,
   type LedgerRepository,
 } from '../../src/application/ports/ledger.repository';
@@ -129,6 +133,7 @@ function buildUseCase(over: Partial<ProcessWagerDeps>): ProcessWagerTransactionU
     wallets: t.app.get<WalletRepository>(WALLET_REPOSITORY),
     transactions: t.app.get<WagerTransactionRepository>(WAGER_TRANSACTION_REPOSITORY),
     ledger: t.app.get<LedgerRepository>(LEDGER_REPOSITORY),
+    journal: t.app.get<JournalRepository>(JOURNAL_REPOSITORY),
     inbox: t.app.get<InboxRepository>(INBOX_REPOSITORY),
     outbox: t.app.get<OutboxRepository>(OUTBOX_REPOSITORY),
     ids: t.app.get<IdGenerator>(ID_GENERATOR),
@@ -208,6 +213,17 @@ describe('ProcessWagerTransactionUseCase — new transactions', () => {
       balance_before: '100.00',
       balance_after: '75.00',
       wallet_version: 2,
+    });
+    // partida dobrada: contrapartida da casa, igual e oposta à entrada da wallet
+    const journal = await sql('SELECT * FROM journal_entries WHERE transaction_id = ?', [
+      result.transaction.id,
+    ]);
+    expect(journal).toHaveLength(1);
+    expect(journal[0]).toMatchObject({
+      account_id: 'house:provider-a:BRL',
+      direction: 'CREDIT',
+      amount: '25.00',
+      currency: 'BRL',
     });
     expect(await outboxTypesFor(result.transaction.id)).toEqual([
       'WagerTransactionProcessed',

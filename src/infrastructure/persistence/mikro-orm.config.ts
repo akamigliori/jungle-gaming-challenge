@@ -4,6 +4,7 @@ import type { Options } from '@mikro-orm/postgresql';
 import { PostgreSqlDriver } from '@mikro-orm/postgresql';
 import type { AppConfig } from '../config/config';
 import { InboxSchema } from './schemas/inbox.schema';
+import { JournalEntrySchema } from './schemas/journal-entry.schema';
 import { LedgerEntrySchema } from './schemas/ledger-entry.schema';
 import { OutboxSchema } from './schemas/outbox.schema';
 import { WagerTransactionSchema } from './schemas/wager-transaction.schema';
@@ -27,7 +28,14 @@ export function createOrmConfig(cfg: AppConfig): Options {
     user: cfg.db.user,
     password: cfg.db.password,
     dbName: cfg.db.name,
-    entities: [WalletSchema, WagerTransactionSchema, LedgerEntrySchema, OutboxSchema, InboxSchema],
+    entities: [
+      WalletSchema,
+      WagerTransactionSchema,
+      LedgerEntrySchema,
+      JournalEntrySchema,
+      OutboxSchema,
+      InboxSchema,
+    ],
     extensions: [Migrator],
     forceUtcTimezone: true,
     driverOptions: {

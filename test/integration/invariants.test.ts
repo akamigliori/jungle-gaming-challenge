@@ -29,13 +29,21 @@ async function insertEntry(o: {
   after: string;
   version: number;
 }): Promise<void> {
-  await run(
-    `INSERT INTO wallet_ledger_entries
-       (id, wallet_id, transaction_id, direction, amount, currency, balance_before, balance_after,
-        wallet_version, created_at)
-     VALUES (?, ?, ?, ?, ?, 'BRL', ?, ?, ?, NOW())`,
-    [o.id, WALLET_ID, o.txId, o.direction, o.amount, o.before, o.after, o.version],
-  );
+  // ledger + contrapartida da casa na mesma transação, para o trigger deferido de partida dobrada
+  await orm.em.transactional(async (em) => {
+    await em.execute(
+      `INSERT INTO wallet_ledger_entries
+         (id, wallet_id, transaction_id, direction, amount, currency, balance_before, balance_after,
+          wallet_version, created_at)
+       VALUES (?, ?, ?, ?, ?, 'BRL', ?, ?, ?, NOW())`,
+      [o.id, WALLET_ID, o.txId, o.direction, o.amount, o.before, o.after, o.version],
+    );
+    await em.execute(
+      `INSERT INTO journal_entries (id, transaction_id, account_id, direction, amount, currency, created_at)
+       VALUES (?, ?, 'house:p1:BRL', ?, ?, 'BRL', NOW())`,
+      [Bun.randomUUIDv7(), o.txId, o.direction === 'DEBIT' ? 'CREDIT' : 'DEBIT', o.amount],
+    );
+  });
 }
 
 /** Wallet aberta com 100.00 e depois debitada em 10.00; `betBefore`/`betAfter` permitem quebrar a cadeia. */

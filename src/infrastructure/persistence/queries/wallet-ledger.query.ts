@@ -19,26 +19,30 @@ interface SnapshotRow {
   entries: number;
   broken_links: number;
   version_gaps: number;
+  journal_gaps: number;
 }
 
 /**
  * Todas as somas e comparações de dinheiro acontecem aqui, em `NUMERIC`, e saem como texto. A
  * cadeia do ledger usa `LAG`: cada lançamento deve partir do `balance_after` do anterior (o
- * primeiro parte de zero) e ter a versão do anterior + 1.
+ * primeiro parte de zero) e ter a versão do anterior + 1. A contrapartida da casa (partida
+ * dobrada) é conferida com um `LEFT JOIN` no journal.
  */
 const SNAPSHOT_SQL = `
   WITH entries AS (
     SELECT
-      direction,
-      amount,
-      balance_before,
-      balance_after,
-      wallet_version,
-      LAG(balance_after) OVER (ORDER BY wallet_version) AS previous_after,
-      LAG(wallet_version) OVER (ORDER BY wallet_version) AS previous_version,
-      ROW_NUMBER() OVER (ORDER BY wallet_version DESC) AS reverse_position
-    FROM wallet_ledger_entries
-    WHERE wallet_id = ?
+      e.direction,
+      e.amount,
+      e.balance_before,
+      e.balance_after,
+      e.wallet_version,
+      LAG(e.balance_after) OVER (ORDER BY e.wallet_version) AS previous_after,
+      LAG(e.wallet_version) OVER (ORDER BY e.wallet_version) AS previous_version,
+      ROW_NUMBER() OVER (ORDER BY e.wallet_version DESC) AS reverse_position,
+      j.transaction_id AS journal_transaction_id
+    FROM wallet_ledger_entries e
+    LEFT JOIN journal_entries j ON j.transaction_id = e.transaction_id
+    WHERE e.wallet_id = ?
   ),
   totals AS (
     SELECT
@@ -47,7 +51,8 @@ const SNAPSHOT_SQL = `
       MAX(wallet_version) AS ledger_version,
       MAX(balance_after) FILTER (WHERE reverse_position = 1) AS last_balance_after,
       COUNT(*) FILTER (WHERE balance_before <> COALESCE(previous_after, 0))::INT AS broken_links,
-      COUNT(*) FILTER (WHERE previous_version IS NOT NULL AND wallet_version <> previous_version + 1)::INT AS version_gaps
+      COUNT(*) FILTER (WHERE previous_version IS NOT NULL AND wallet_version <> previous_version + 1)::INT AS version_gaps,
+      COUNT(*) FILTER (WHERE journal_transaction_id IS NULL)::INT AS journal_gaps
     FROM entries
   )
   SELECT
@@ -63,7 +68,8 @@ const SNAPSHOT_SQL = `
     t.ledger_version,
     t.entries,
     t.broken_links,
-    t.version_gaps
+    t.version_gaps,
+    t.journal_gaps
   FROM wallets w
   CROSS JOIN totals t
   WHERE w.id = ?`;
@@ -100,5 +106,6 @@ function toSnapshot(r: SnapshotRow): WalletLedgerSnapshot {
     entries: r.entries,
     brokenLinks: r.broken_links,
     versionGaps: r.version_gaps,
+    journalGaps: r.journal_gaps,
   };
 }

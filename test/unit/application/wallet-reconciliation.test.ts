@@ -16,6 +16,7 @@ const consistent: WalletLedgerSnapshot = {
   entries: 3,
   brokenLinks: 0,
   versionGaps: 0,
+  journalGaps: 0,
 };
 
 describe('findIssues', () => {
@@ -54,6 +55,10 @@ describe('findIssues', () => {
       'LEDGER_CHAIN_BROKEN',
       'LEDGER_VERSION_GAP',
     ]);
+  });
+
+  test('a ledger entry without a journal counterparty → DOUBLE_ENTRY_GAP', () => {
+    expect(findIssues({ ...consistent, journalGaps: 1 })).toEqual(['DOUBLE_ENTRY_GAP']);
   });
 });
 

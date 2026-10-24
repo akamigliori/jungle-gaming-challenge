@@ -26,6 +26,8 @@ export interface WalletLedgerSnapshot {
   brokenLinks: number;
   /** Lançamentos cuja versão não é a do anterior + 1. */
   versionGaps: number;
+  /** Lançamentos sem a contrapartida da casa (partida dobrada quebrada). */
+  journalGaps: number;
 }
 
 export interface WalletLedgerReader {
