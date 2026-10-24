@@ -99,7 +99,10 @@ export class CreateWalletUseCase {
     const context = () => ({ eventId: ids.next(), correlationId, occurredAt: at });
     await outbox.enqueue(OutboxMessage.enqueue(WagerTransactionProcessed.from(opening, context())));
     await outbox.enqueue(
-      OutboxMessage.enqueue(WalletBalanceChanged.from(wallet, entry, context())),
+      OutboxMessage.enqueue(
+        WalletBalanceChanged.from(wallet, entry, context()),
+        entry.walletVersion,
+      ),
     );
   }
 }

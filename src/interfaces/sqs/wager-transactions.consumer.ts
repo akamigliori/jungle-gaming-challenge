@@ -1,7 +1,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import {
   ChangeMessageVisibilityCommand,
-  DeleteMessageCommand,
+  DeleteMessageBatchCommand,
   GetQueueUrlCommand,
   type Message,
   ReceiveMessageCommand,
@@ -38,6 +38,8 @@ const RECEIVE_ERROR_BACKOFF_MS = 1000;
 const INVALID_PAYLOAD_CODE: FailureCode = 'INVALID_PAYLOAD';
 /** Visibilidade 0: a mensagem devolvida no shutdown fica disponível na hora para outra instância. */
 const RELEASE_NOW_SECONDS = 0;
+/** Limite do SQS por chamada de `DeleteMessageBatch`. */
+const MAX_DELETE_BATCH_SIZE = 10;
 
 /** Subconjunto do logger usado pelo consumer. */
 export type ConsumerLogger = Pick<PinoLogger, 'info' | 'warn' | 'error'>;
@@ -70,10 +72,11 @@ interface MessageLogContext {
  *
  * `loops` laços independentes fazem long polling; cada lote é agrupado por `MessageGroupId`
  * (= wallet): grupos em paralelo, mensagens do mesmo grupo em sequência, preservando a ordem por
- * wallet. O ack (`DeleteMessage`) só acontece depois que o caso de uso resolveu, isto é, depois do
- * COMMIT de inbox, saldo, ledger e outbox. Falha permanente vai explicitamente para a DLQ; falha
- * transitória volta para a fila com backoff (`ChangeMessageVisibility`). Nenhum estado de mensagem
- * fica em memória: o contador de tentativas é o `ApproximateReceiveCount` do SQS.
+ * wallet. O ack (`DeleteMessageBatch`, ao fim do lote) só acontece depois que o caso de uso
+ * resolveu, isto é, depois do COMMIT de inbox, saldo, ledger e outbox. Falha permanente vai
+ * explicitamente para a DLQ; falha transitória volta para a fila com backoff
+ * (`ChangeMessageVisibility`). Nenhum estado de mensagem fica em memória: o contador de tentativas
+ * é o `ApproximateReceiveCount` do SQS.
  *
  * Uma mensagem que não sai da fila encerra o grupo no lote: as seguintes da mesma wallet voltam
  * para a fila sem serem processadas, para que nenhuma ultrapasse a que falhou.
@@ -165,31 +168,36 @@ export class WagerTransactionsConsumer
 
   /** Grupos (wallets) em paralelo; dentro do grupo, na ordem em que o SQS entregou. */
   private async processBatch(messages: Message[], urls: QueueUrls): Promise<void> {
-    await Promise.all(
-      [...groupByMessageGroup(messages).values()].map((group) => this.processGroup(group, urls)),
-    );
+    const groups = [...groupByMessageGroup(messages).values()];
+    const acks = (await Promise.all(groups.map((group) => this.processGroup(group, urls)))).flat();
+    await this.ackBatch(acks, urls.transactions);
   }
 
   /**
    * Mensagens do grupo uma de cada vez. A primeira que fica na fila encerra o grupo neste lote:
    * as seguintes voltam com o mesmo atraso dela e são recebidas de novo atrás dela, na ordem FIFO.
    * No shutdown, as que ainda não começaram voltam com visibilidade 0 assim que o grupo chega nelas.
+   * Devolve as mensagens já resolvidas, para o ack em lote do `processBatch`.
    */
-  private async processGroup(group: Message[], urls: QueueUrls): Promise<void> {
+  private async processGroup(group: Message[], urls: QueueUrls): Promise<Message[]> {
+    const acks: Message[] = [];
     for (const [index, message] of group.entries()) {
       if (this.stopping) {
         await this.release(group.slice(index), RELEASE_NOW_SECONDS, urls);
-        return;
+        return acks;
       }
       const outcome = await this.handle(message, urls);
-      if (!outcome.left) {
+      if (outcome.left) {
+        acks.push(message);
+      } else {
         // sem atraso conhecido (erro do SQS), as seguintes esperam o próprio visibility timeout
         if (outcome.retryInSeconds !== undefined) {
           await this.release(group.slice(index + 1), outcome.retryInSeconds, urls);
         }
-        return;
+        return acks;
       }
     }
+    return acks;
   }
 
   /** Devolve mensagens não processadas à fila, visíveis depois de `seconds`. */
@@ -258,10 +266,9 @@ export class WagerTransactionsConsumer
       return this.handleFailure(message, error, urls, context);
     }
 
-    // a duração é a do processamento; o ack não entra nela
+    // a duração é a do processamento; o ack (em lote, no fim do lote) não entra nela
     const { transaction, idempotentReplay } = result;
     const outcome = wagerOutcomeFields(transaction, idempotentReplay, startedAt);
-    await this.ack(message, urls.transactions);
     this.logger.info({ ...context, ...outcome }, 'wager message processed');
     return { left: true };
   }
@@ -305,8 +312,9 @@ export class WagerTransactionsConsumer
   }
 
   /**
-   * Envia o mesmo corpo para a DLQ e só então dá ack na principal. Se o processo morrer entre os
-   * dois, a mensagem volta, falha de novo e o reenvio é deduplicado pelo SQS (`MessageId` original).
+   * Envia o mesmo corpo para a DLQ e marca para o ack em lote (que só acontece no fim do lote). Se
+   * o processo morrer entre os dois, a mensagem volta, falha de novo e o reenvio é deduplicado pelo
+   * SQS (`MessageId` original).
    */
   private async deadLetter(
     message: Message,
@@ -326,13 +334,32 @@ export class WagerTransactionsConsumer
       }),
     );
     this.metrics.messageDeadLettered(failureCode);
-    await this.ack(message, urls.transactions);
   }
 
-  private async ack(message: Message, queueUrl: string): Promise<void> {
-    await this.sqs.send(
-      new DeleteMessageCommand({ QueueUrl: queueUrl, ReceiptHandle: message.ReceiptHandle }),
-    );
+  /**
+   * Apaga as mensagens resolvidas numa única chamada (até o limite do SQS por chamada). Uma falha
+   * parcial só é logada: a mensagem reaparece depois do visibility timeout e a inbox impede efeito
+   * duplicado; uma falha total deixa o `receiveLoop` tratar como erro do SQS.
+   */
+  private async ackBatch(messages: Message[], queueUrl: string): Promise<void> {
+    for (let i = 0; i < messages.length; i += MAX_DELETE_BATCH_SIZE) {
+      const slice = messages.slice(i, i + MAX_DELETE_BATCH_SIZE);
+      const { Failed = [] } = await this.sqs.send(
+        new DeleteMessageBatchCommand({
+          QueueUrl: queueUrl,
+          Entries: slice.map((message, index) => ({
+            Id: String(index),
+            ReceiptHandle: message.ReceiptHandle,
+          })),
+        }),
+      );
+      if (Failed.length > 0) {
+        this.logger.warn(
+          { failedIds: Failed.map((entry) => entry.Id) },
+          'wager ack batch partially failed; messages will be redelivered',
+        );
+      }
+    }
   }
 
   /** URLs resolvidas uma vez e reaproveitadas; uma falha não fica guardada. */

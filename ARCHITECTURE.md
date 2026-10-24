@@ -149,6 +149,12 @@ chega ao banco: `Money.add` lança erro de domínio e, num crédito, a transaç�
   acumular mudanças para um `flush` no fim. A ordem dos comandos fica explícita no caso de uso
   (wallet → transação → ledger → outbox), as violações de constraint aparecem no ponto exato em
   que acontecem e não há unit of work implícito para depurar.
+- **Integridade do ledger no schema.** Além da FK de `transaction_id`, o trigger
+  `ledger_wallet_matches_transaction` rejeita (BEFORE INSERT) um lançamento cujo par
+  `(transaction_id, wallet_id)` não exista em `wager_transactions` — isto é, cuja wallet difere da
+  wallet da transação referenciada. A alternativa declarativa (FK composta) exigiria um
+  `UNIQUE (id, wallet_id)` redundante em `wager_transactions`; o trigger dá a mesma garantia sem
+  índice a mais na tabela mais quente do fluxo.
 - **`POST /wallets`**: numa única transação, insere a wallet e, se o saldo inicial for positivo, a
   transação interna `OPENING` já `PROCESSED`, o lançamento `CREDIT` (versão 1) e os eventos
   `WagerTransactionProcessed` e `WalletBalanceChanged` na outbox. Saldo zero grava só a wallet
@@ -415,20 +421,22 @@ da transação: o envio só acontece depois, a partir do que já está confirmad
 **Publisher.** Cada instância roda um loop (`OutboxPublisherWorker`) que chama
 `PublishOutboxUseCase.runOnce()` a cada `OUTBOX_POLL_INTERVAL_MS` (250 ms). Um ciclo:
 1. **Reserva** (transação curta e própria):
-   `SELECT ... FROM outbox_messages WHERE published_at IS NULL AND next_attempt_at <= $agora
-   ORDER BY occurred_at, id LIMIT $lote FOR UPDATE SKIP LOCKED` e, na mesma transação,
-   `next_attempt_at = $agora + lease` (30 s) para as linhas escolhidas; `COMMIT`.
+   `SELECT ... FROM outbox_messages o WHERE published_at IS NULL AND next_attempt_at <= $agora
+   AND NOT EXISTS (versão menor da mesma wallet ainda não publicada) ORDER BY occurred_at, id
+   LIMIT $lote FOR UPDATE SKIP LOCKED` e, na mesma transação, `next_attempt_at = $agora + lease`
+   (30 s) para as linhas escolhidas; `COMMIT`. O `NOT EXISTS` é a cabeça por wallet da seção
+   "Ordem estrita por wallet".
 2. **Publica** fora de qualquer transação, em `wagering-events.fifo`, com
    `MessageGroupId = aggregateId` (a wallet) e `MessageDeduplicationId = eventId`; o corpo é o
-   envelope JSON gravado no `payload`. Eventos da mesma wallet saem um de cada vez, na ordem do
-   lote; wallets diferentes saem em paralelo.
-3. **Registra** o resultado, em escritas curtas e separadas: sucesso →
+   envelope JSON gravado no `payload`. O lote inteiro é enviado em chamadas de até 10
+   (`SendMessageBatch`): menos round-trips ao SQS do que um `SendMessage` por evento.
+3. **Registra** o resultado por entrada, em escritas curtas e separadas: sucesso →
    `UPDATE ... SET published_at = $agora WHERE id = $id AND published_at IS NULL`; falha →
    `attempts + 1`, `next_attempt_at` com backoff exponencial e jitter (1 s, 2 s, 4 s ... até 5 min)
-   e `last_error` (até 500 caracteres). Uma falha não impede as outras wallets do lote, mas para a
-   wallet dela neste ciclo: as mensagens seguintes da mesma wallet são adiadas para o mesmo
-   horário da nova tentativa, sem contar tentativa, para não saírem antes da que falhou.
-   As duas escritas só valem enquanto a reserva ainda é de quem escreve
+   e `last_error` (até 500 caracteres). Uma entrada falha não impede as demais do lote; se a chamada
+   em lote nem chega a acontecer (rede), o lote inteiro é reagendado. A ordem por wallet continua
+   garantida pelo claim (cabeça por wallet), não por este código.
+   As escritas só valem enquanto a reserva ainda é de quem escreve
    (`next_attempt_at <= fim do lease reservado`): se o lease venceu e outra instância reservou a
    linha de novo, uma falha atrasada não sobrescreve o lease nem o `attempts` dela.
 
@@ -466,23 +474,26 @@ publishers marcando a mesma linha.
 
 Os testes de integração (`test/integration/outbox-publisher.test.ts`, Postgres e LocalStack reais)
 cobrem: publicação única e marcação; segunda execução não republica; falha no envio
-(`attempts = 1`, nova tentativa no futuro, `last_error`, demais wallets publicadas); falha parando
-a wallet no ciclo e publicando-a em ordem no seguinte; falha atrasada que não sobrescreve a reserva
-de outra instância; dois
+(`attempts = 1`, nova tentativa no futuro, `last_error`, demais wallets publicadas); uma entrada
+falha sem bloquear o resto do lote e é publicada no ciclo seguinte; falha atrasada que não
+sobrescreve a reserva de outra instância; dois
 publishers concorrentes sobre 100 eventos (todos recebidos, cada linha reservada por um único
-publisher, nenhuma pendente); reserva abandonada não é pega antes do lease e é publicada depois; e
-o worker ligado publicando os eventos de uma wallet nova de ponta a ponta. Os testes controlam o
+publisher, nenhuma pendente); reserva abandonada não é pega antes do lease e é publicada depois; a
+cabeça por wallet (a v2 não é reivindicada antes de a v1 publicar) e a ordem estrita por
+`wallet_version` mesmo com `occurred_at` fora de ordem; o envio em lotes de até 10 (unit);
+e o worker ligado publicando os eventos de uma wallet nova de ponta a ponta. Os testes controlam o
 relógio (`Clock` injetado) para avançar além do lease sem esperar.
 
-**Ordem: melhor esforço.** Dentro de um ciclo, eventos da mesma wallet saem na ordem gravada, e o
-`MessageGroupId` por wallet mantém essa ordem dentro da fila FIFO. Dentro de um mesmo lote, uma
-falha adia o evento que falhou e os seguintes da mesma wallet, que voltam juntos no ciclo seguinte.
-Mas um evento posterior da mesma wallet (gravado depois da falha, ou fora do `LIMIT` do lote) pode
-ser publicado no ciclo seguinte antes do que falhou, que ainda espera o backoff. Com vários
-publishers, eventos da mesma wallet também podem sair fora de ordem (dois lotes da mesma
-wallet reservados por instâncias diferentes; um lease vencido no meio de um envio lento). Por isso
-`WalletBalanceChanged` carrega `walletVersion`, que o consumidor usa para ordenar ou descartar
-eventos antigos. A garantia final de ordem é o `wallet_version` do ledger, não a fila.
+**Ordem estrita por wallet.** A coluna `wallet_version` da outbox (preenchida só em
+`WalletBalanceChanged`, com a versão do lançamento) e o filtro de "cabeça" no `claimDue` garantem
+que o evento de saldo de uma wallet só sai quando nenhuma versão anterior daquela wallet ainda está
+não publicada: um `NOT EXISTS` de versão menor pendente, somado ao `FOR UPDATE SKIP LOCKED`, faz
+nenhum publisher reivindicar a v2 enquanto a v1 está em voo — mesmo travada por outra instância. A
+ordem deixa de depender de `occurred_at` (relógio de parede, sujeito a skew entre instâncias) e do
+acaso da divisão entre publishers: ela é garantida no banco, e o `MessageGroupId` por wallet a
+preserva dentro da fila FIFO. Eventos de transação (`wallet_version NULL`) não têm versão e seguem
+melhor-esforço, como antes; o consumidor que precisa de ordem de saldo usa o `walletVersion` do
+payload como referência. O índice parcial `outbox_balance_unpublished_idx` serve o filtro de cabeça.
 
 ## 12. Consumo por SQS
 
@@ -502,7 +513,7 @@ se mantém entre laços e entre instâncias.
 
 | Classe            | Exemplos                                                                                                              | O que o consumer faz                                                           |
 | ----------------- | --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| Resultado gravado | `PROCESSED`, `REJECTED`, `PENDING_REFERENCE`, replay                                                                  | ack (`DeleteMessage`) depois do `COMMIT`                                       |
+| Resultado gravado | `PROCESSED`, `REJECTED`, `PENDING_REFERENCE`, replay                                                                  | ack em lote (`DeleteMessageBatch`) depois do `COMMIT`                          |
 | Permanente        | `INVALID_PAYLOAD` (JSON ou schema), `INVALID_MONEY`, `REFERENCE_REQUIRED`, `WALLET_NOT_FOUND`, `IDEMPOTENCY_CONFLICT` | DLQ explícita na primeira entrega                                              |
 | Transitório       | `TransientFailureError`: `lock_timeout`, deadlock, conexão, `statement_timeout`, depois dos 3 retries do caso de uso  | volta para a fila com backoff; o redrive leva para a DLQ depois de 10 entregas |
 | Inesperado        | qualquer outro erro (bug, `InvariantViolationError`)                                                                  | backoff nas 2 primeiras entregas; na 3ª, DLQ explícita com `INTERNAL_ERROR`    |
@@ -517,7 +528,7 @@ atraso nunca muda o resultado.
 
 **DLQ explícita.** `SendMessage` na DLQ com o mesmo corpo, o `MessageGroupId` original,
 `MessageDeduplicationId` = `MessageId` do SQS e os atributos `failureCode` e `failedAt`; só depois
-o `DeleteMessage` na fila principal. Se o processo morrer entre os dois, a mensagem volta, falha de
+o ack (em lote) na fila principal. Se o processo morrer entre os dois, a mensagem volta, falha de
 novo e o reenvio para a DLQ é descartado pela deduplicação do SQS.
 
 **Backoff.** `ChangeMessageVisibility` com `min(1 s × 2^(entrega − 1), 300 s)` e _equal jitter_
@@ -533,11 +544,16 @@ a consulta de idempotência e vira replay; o mesmo `messageId` com outro `data` 
 `IDEMPOTENCY_CONFLICT` e vai para a DLQ. A mesma aposta enviada por HTTP e depois por SQS (mesma
 chave) gera uma única transação: a mensagem cai no replay e recebe ack.
 
-**Ack só depois do `COMMIT`.** Se a instância morre depois do `COMMIT` e antes do `DeleteMessage`,
-a mensagem reaparece depois do visibility timeout, outra instância a recebe, a inbox e a chave de
-idempotência fazem dela um replay e ela recebe ack: um lançamento no ledger, uma linha na inbox e
-nenhum evento duplicado na outbox. Se morre antes do `COMMIT`, o Postgres desfaz a transação e a
-mensagem é processada do zero na próxima entrega.
+**Ack em lote depois do `COMMIT`.** As mensagens resolvidas num lote de recebimento são apagadas
+juntas, no fim do lote, com `DeleteMessageBatch` (até o limite de 10 do SQS por chamada): o ack
+individual por mensagem vira uma chamada por lote, reduzindo chamadas ao SQS sob carga. Uma
+mensagem só entra no lote de ack depois que o caso de uso resolveu, nunca antes do `COMMIT`. Se a
+instância morre depois do `COMMIT` e antes do ack em lote, a mensagem reaparece depois do visibility
+timeout, outra instância a recebe, a inbox e a chave de idempotência fazem dela um replay e ela
+recebe ack: um lançamento no ledger, uma linha na inbox e nenhum evento duplicado na outbox. Se
+morre antes do `COMMIT`, o Postgres desfaz a transação e a mensagem é processada do zero na próxima
+entrega. Uma falha parcial do `DeleteMessageBatch` só é logada: as entradas não apagadas reaparecem
+depois do visibility timeout e são tratadas pela inbox.
 
 **Ordem FIFO.** No lote, os grupos (wallets) rodam em paralelo e as mensagens de um grupo, em
 sequência. A primeira mensagem do grupo que não sai da fila (transitório, inesperado antes da 3ª
@@ -601,8 +617,9 @@ da ordem de 10 min antes de ir para a DLQ; com 5, cerca de 30 s de falha já bas
 **Como é testado** (`test/integration/sqs-consumer.test.ts`, Postgres e LocalStack reais, filas
 próprias da suíte com visibility de 2 s e `maxReceiveCount` 3). Falhas são simuladas trocando um
 provider da aplicação (repositório de wallet que lança ou demora, cliente SQS que engole o
-`DeleteMessage`), nunca com mocks de banco ou fila. Casos: mensagem válida processada e confirmada;
-reentrega com o mesmo `messageId` (um débito, duas confirmações); mesmo `messageId` com outro corpo
+`DeleteMessageBatch`), nunca com mocks de banco ou fila. Casos: mensagem válida processada e
+confirmada; várias mensagens do mesmo lote apagadas num único `DeleteMessageBatch`; reentrega com o
+mesmo `messageId` (um débito, duas confirmações); mesmo `messageId` com outro corpo
 na DLQ como `IDEMPOTENCY_CONFLICT`; JSON quebrado, valor numérico e wallet inexistente na DLQ na
 primeira entrega; a mesma aposta por HTTP e por SQS; a ordem FIFO descrita acima; transitório que
 se resolve na 3ª entrega, sem DLQ; erro inesperado na DLQ como `INTERNAL_ERROR`, recebido
@@ -926,7 +943,7 @@ aparece). Formato: decisão, alternativas consideradas e motivo.
 | `CHECK` `wager_tx_reversal_resolved_ck`: `REFUND`/`ROLLBACK` `PROCESSED` exige `reference_transaction_id`                                                                                                                             | confiar só no processador; `UNIQUE NULLS NOT DISTINCT` | o índice parcial `wager_tx_single_reversal_uq` não enxerga `NULL`, então uma reversão processada sem referência escaparia de "uma reversão por referência"; `NULLS NOT DISTINCT` faria todas as reversões sem referência colidirem entre si |
 | `CHECK` baratos: snapshot de `PROCESSED`, referência diferente da própria linha, versões ≥ 1, contadores ≥ 0                                                                                                                          | validar só no domínio                                  | custo zero em runtime e invariantes no schema, como o enunciado pede                                                                                                                                                                        |
 | Colunas de resultado da transação (`status`, `failure_code`, `balance_after`, `wallet_version_after`, `processed_at`, `reference_*`, `updated_at`) mutáveis; identidade, valores, `payload_hash` e `created_at` imutáveis por trigger | tabela de transação toda imutável                      | a transação nasce pendente e recebe o resultado depois; o que identifica e o que foi pedido nunca muda                                                                                                                                      |
-| Sem FK composta `(transaction_id, wallet_id)` do ledger para `wager_transactions`                                                                                                                                                     | adicioná-la                                            | exigiria um `UNIQUE` extra em `wager_transactions`; o caso de uso grava os dois com o mesmo `walletId` e a reconciliação detectaria a divergência                                                                                           |
+| Trigger `ledger_wallet_matches_transaction` garante que o lançamento aponta para uma transação da mesma wallet                                                                                                                        | FK composta `(transaction_id, wallet_id)`              | a FK composta exigiria um `UNIQUE (id, wallet_id)` redundante em `wager_transactions`; o trigger dá a mesma garantia com um `SELECT` por insert de ledger, sem índice a mais                                                                |
 | Migrations por script próprio (`scripts/migrate.ts`, Migrator do MikroORM)                                                                                                                                                            | CLI do MikroORM                                        | funciona com Bun sem ts-node; `down` reverte a última migration                                                                                                                                                                             |
 | Migrations ficam imutáveis depois de aplicadas; mudança de schema é migration nova e reversível                                                                                                                                       | editar a inicial                                       | bancos já migrados não divergem do código                                                                                                                                                                                                   |
 
@@ -984,8 +1001,6 @@ diz o que custaria e como entraria.
 - A chave de idempotência e o `externalTransactionId` são independentes: reenviar a mesma operação
   de negócio com uma chave nova e o mesmo `externalTransactionId` é `409 IDEMPOTENCY_CONFLICT`, e o
   provedor corrige usando um `externalTransactionId` novo.
-- O ledger não tem FK composta `(transaction_id, wallet_id)`: a coerência entre a wallet do
-  lançamento e a da transação depende do caso de uso e é conferida pela reconciliação (seção 15).
 - Uma pendência cuja reavaliação falha sempre com um erro não transitório (um bug) é tentada de
   novo a cada lease (`PENDING_REFERENCE_LEASE_MS`, 30 s por padrão) e logada a cada vez; `reference_attempts` não cresce, então ela não
   chega à rejeição sozinha.
@@ -1035,14 +1050,6 @@ diz o que custaria e como entraria.
 
 - **Alertas** sobre as métricas já expostas (outbox lag crescendo, `wagering_dlq_messages_total`
   subindo, conflitos de lock) e um dashboard: hoje só há o endpoint de coleta.
-- **Ordem estrita de eventos por wallet**: publicar por agregado em ordem de `wallet_version`
-  (coluna de sequência na outbox e claim por agregado), em vez do melhor esforço atual.
-- **Ack em lote** (`DeleteMessageBatch`) no consumer, para reduzir chamadas ao SQS sob carga.
 - **Usuário de banco só com DML** para a aplicação (`SELECT`, `INSERT`, `UPDATE`), sem `TRUNCATE`
   nem DDL; as migrations rodam com outro usuário.
-- **Publicar a outbox em lote** (`SendMessageBatch`) e perfilar o publisher: é o gargalo
-  observado no teste de carga (seção 16). Junto, uma métrica de espera por conexão do pool para
-  decidir o tamanho dele (hoje 10 por instância).
 - **Retenção da outbox**: job que apaga as linhas já publicadas depois de um prazo.
-- **FK composta no ledger** `(transaction_id, wallet_id)` para `wager_transactions`, o que exige
-  um `UNIQUE (id, wallet_id)` extra nessa tabela.

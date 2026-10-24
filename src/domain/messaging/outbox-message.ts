@@ -13,6 +13,8 @@ export interface OutboxMessageState {
   attempts: number;
   nextAttemptAt?: Date;
   publishedAt?: Date;
+  /** Sequência por wallet (só em `WalletBalanceChanged`): ordena a publicação por versão. */
+  walletVersion?: number;
 }
 
 export class OutboxMessage {
@@ -21,6 +23,7 @@ export class OutboxMessage {
   readonly eventType: string;
   readonly payload: Readonly<Record<string, unknown>>;
   readonly occurredAt: Date;
+  readonly walletVersion: number | undefined;
   private _attempts: number;
   private _nextAttemptAt: Date | undefined;
   private _publishedAt: Date | undefined;
@@ -31,12 +34,13 @@ export class OutboxMessage {
     this.eventType = s.eventType;
     this.payload = s.payload;
     this.occurredAt = s.occurredAt;
+    this.walletVersion = s.walletVersion;
     this._attempts = s.attempts;
     this._nextAttemptAt = s.nextAttemptAt;
     this._publishedAt = s.publishedAt;
   }
 
-  static enqueue(event: IntegrationEvent<unknown>): OutboxMessage {
+  static enqueue(event: IntegrationEvent<unknown>, walletVersion?: number): OutboxMessage {
     return new OutboxMessage({
       id: event.eventId,
       aggregateId: event.aggregateId,
@@ -45,6 +49,7 @@ export class OutboxMessage {
       occurredAt: event.occurredAt,
       attempts: 0,
       nextAttemptAt: event.occurredAt,
+      walletVersion,
     });
   }
 

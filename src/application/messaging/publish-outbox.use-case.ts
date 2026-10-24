@@ -1,8 +1,11 @@
 import type { OutboxMessage } from '../../domain/messaging/outbox-message';
 import type { Clock } from '../ports/clock';
-import type { EventPublisher } from '../ports/event-publisher';
+import type { BatchPublishResult, EventPublisher } from '../ports/event-publisher';
 import type { Metrics } from '../ports/metrics';
 import type { OutboxRepository } from '../ports/outbox.repository';
+
+/** Limite do SQS por chamada de `SendMessageBatch`. */
+export const SEND_BATCH_MAX = 10;
 
 export interface PublishOutboxDeps {
   outbox: OutboxRepository;
@@ -33,13 +36,13 @@ export interface PublishOutboxResult {
 }
 
 /**
- * Um ciclo do publisher da outbox: reserva um lote de eventos já confirmados no banco,
- * publica cada um fora de qualquer transação e registra o resultado.
+ * Um ciclo do publisher da outbox: reserva um lote de eventos já confirmados no banco e publica
+ * tudo em chamadas em lote de até `SEND_BATCH_MAX`, fora de qualquer transação, registrando o
+ * resultado por entrada.
  *
- * - Sucesso → `published_at`. Falha → nova tentativa com backoff (`scheduleRetry`); uma
- *   mensagem com erro não impede as outras wallets do lote.
- * - Mensagens da mesma wallet saem em sequência, na ordem do lote; wallets diferentes em paralelo.
- *   Se uma mensagem falha, as seguintes da mesma wallet ficam para o próximo ciclo, junto com ela.
+ * - Sucesso → `published_at`. Falha → nova tentativa com backoff (`scheduleRetry`); a ordem por
+ *   wallet continua garantida pelo claim (cabeça por wallet), não por este código.
+ * - Uma chamada em lote que nem chega a acontecer (rede) marca o lote inteiro como falho.
  * - Garantia at-least-once: se o processo morrer entre publicar e marcar, a mensagem é publicada
  *   de novo depois do lease, com o mesmo `eventId` (o consumidor deduplica por ele).
  */
@@ -50,81 +53,57 @@ export class PublishOutboxUseCase {
     const { outbox, clock, batchSize, leaseMs } = this.deps;
     const batch = await outbox.claimDue({ now: clock.now(), limit: batchSize, leaseMs });
 
-    const outcomes = await Promise.allSettled(
-      groupByAggregate(batch).map((group) => this.publishGroup(group)),
-    );
-
     const result: PublishOutboxResult = { published: 0, failed: 0, failures: [] };
-    for (const outcome of outcomes) {
-      // rejeição aqui é erro do banco ao registrar o resultado: sobe para o ciclo logar
-      if (outcome.status === 'rejected') throw outcome.reason;
-      result.published += outcome.value.published;
-      result.failed += outcome.value.failed;
-      result.failures.push(...outcome.value.failures);
+    for (let i = 0; i < batch.length; i += SEND_BATCH_MAX) {
+      const chunk = batch.slice(i, i + SEND_BATCH_MAX);
+      const { published, failures } = await this.publishChunk(chunk);
+      for (const id of published) {
+        await outbox.markPublished(id, clock.now());
+      }
+      result.published += published.length;
+      result.failed += failures.length;
+      result.failures.push(...failures);
     }
     return result;
   }
 
   /**
-   * Publica as mensagens de uma wallet em ordem. Na primeira falha, para a wallet neste ciclo:
-   * a que falhou ganha backoff e as seguintes são adiadas para o mesmo horário, para que nenhuma
-   * saia antes dela.
+   * Envia um lote (até `SEND_BATCH_MAX`) e registra o resultado: publicadas são devolvidas para o
+   * `markPublished`; falhas ganham backoff e `reschedule`, valendo só enquanto o lease é nosso.
    */
-  private async publishGroup(group: OutboxMessage[]): Promise<PublishOutboxResult> {
-    const { outbox } = this.deps;
-    const result: PublishOutboxResult = { published: 0, failed: 0, failures: [] };
-    for (const [index, message] of group.entries()) {
-      // reserva feita pelo claim; usada para não sobrescrever uma reserva de outra instância
-      const claimedUntil = message.nextAttemptAt ?? message.occurredAt;
-      const failure = await this.publishOne(message, claimedUntil);
-      if (!failure) {
-        result.published += 1;
-        continue;
-      }
-      result.failed += 1;
-      result.failures.push(failure);
-      const rest = group.slice(index + 1).map((m) => m.id);
-      const until = message.nextAttemptAt ?? claimedUntil;
-      await outbox.postpone(rest, { until, claimedUntil });
-      break;
-    }
-    return result;
-  }
-
-  /** `undefined` quando publicou; senão, a falha (a mensagem já foi reagendada). */
-  private async publishOne(
-    message: OutboxMessage,
-    claimedUntil: Date,
-  ): Promise<PublishFailure | undefined> {
+  private async publishChunk(
+    chunk: OutboxMessage[],
+  ): Promise<{ published: string[]; failures: PublishFailure[] }> {
     const { outbox, publisher, clock, metrics, random } = this.deps;
+    let outcome: BatchPublishResult;
     try {
-      await publisher.publish(message);
+      outcome = await publisher.publishBatch(chunk);
     } catch (error) {
+      outcome = {
+        published: [],
+        failed: chunk.map((message) => ({ id: message.id, error: describeError(error) })),
+      };
+    }
+
+    const failures: PublishFailure[] = [];
+    for (const failure of outcome.failed) {
+      const message = chunk.find((candidate) => candidate.id === failure.id);
+      if (!message) continue;
+      // a reserva (lease) é lida antes do backoff, que reescreve o nextAttemptAt da mensagem
+      const claimedUntil = message.nextAttemptAt ?? message.occurredAt;
       metrics.retryScheduled('outbox_publish');
       message.scheduleRetry(clock.now(), random);
-      await outbox.reschedule(message, { error: describeError(error), claimedUntil });
-      return {
+      await outbox.reschedule(message, { error: failure.error, claimedUntil });
+      failures.push({
         eventId: message.id,
         eventType: message.eventType,
         aggregateId: message.aggregateId,
         attempts: message.attempts,
-        error,
-      };
+        error: new Error(failure.error),
+      });
     }
-    await outbox.markPublished(message.id, clock.now());
-    return undefined;
+    return { published: outcome.published, failures };
   }
-}
-
-/** Agrupa por wallet mantendo a ordem do lote dentro de cada grupo. */
-function groupByAggregate(batch: OutboxMessage[]): OutboxMessage[][] {
-  const groups = new Map<string, OutboxMessage[]>();
-  for (const message of batch) {
-    const group = groups.get(message.aggregateId);
-    if (group) group.push(message);
-    else groups.set(message.aggregateId, [message]);
-  }
-  return [...groups.values()];
 }
 
 function describeError(error: unknown): string {

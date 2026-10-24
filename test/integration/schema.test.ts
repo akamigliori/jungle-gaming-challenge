@@ -397,6 +397,14 @@ describe('wallet_ledger_entries', () => {
     );
   });
 
+  test('ledger wallet_id different from the transaction wallet → trigger error', async () => {
+    const { tx } = await seed();
+    const other = await insertWallet();
+    await expect(insertLedger({ walletId: other, txId: tx })).rejects.toThrow(
+      'must match the referenced transaction',
+    );
+  });
+
   test('balance_after negative → check', async () => {
     const { w, tx } = await seed();
     await expect(
@@ -434,6 +442,15 @@ describe('inbox/outbox', () => {
       [uuid()],
     );
     expect(msg).toContain('outbox_attempts_ck');
+  });
+
+  test('outbox wallet_version zero → outbox_wallet_version_ck', async () => {
+    const msg = await failure(
+      `INSERT INTO outbox_messages (id, aggregate_id, event_type, payload, occurred_at, attempts, next_attempt_at, wallet_version)
+       VALUES (?, 'a', 'E', '{}', NOW(), 0, NOW(), 0)`,
+      [uuid()],
+    );
+    expect(msg).toContain('outbox_wallet_version_ck');
   });
 });
 

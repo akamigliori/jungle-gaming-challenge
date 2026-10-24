@@ -215,6 +215,65 @@ describe('outbox publisher', () => {
     expect(row?.last_error).toBeNull();
   });
 
+  test('a wallet with an unpublished balance event only claims its head (lowest wallet_version)', async () => {
+    const clock = new FakeClock(new Date());
+    const now = clock.now();
+    const walletId = crypto.randomUUID();
+    const v1 = crypto.randomUUID();
+    const v2 = crypto.randomUUID();
+    const insert = (id: string, version: number) =>
+      sql(
+        `INSERT INTO outbox_messages (id, aggregate_id, event_type, payload, occurred_at, attempts, next_attempt_at, wallet_version)
+         VALUES (?, ?, 'WalletBalanceChanged', '{}'::JSONB, ?, 0, ?, ?)`,
+        [id, walletId, now, now, version],
+      );
+    await insert(v1, 1);
+    await insert(v2, 2);
+
+    const first = await outbox.claimDue({ now, limit: 10, leaseMs: LEASE_MS });
+    expect(first.map((m) => m.id)).toEqual([v1]);
+    expect(first[0]?.walletVersion).toBe(1);
+
+    await outbox.markPublished(v1, now);
+    const second = await outbox.claimDue({ now, limit: 10, leaseMs: LEASE_MS });
+    expect(second.map((m) => m.id)).toEqual([v2]);
+    expect(second[0]?.walletVersion).toBe(2);
+  });
+
+  test('publishes balance events in wallet_version order even when occurred_at is out of order', async () => {
+    const clock = new FakeClock(new Date());
+    const base = clock.now().getTime();
+    const walletId = crypto.randomUUID();
+    // ocorre fora de ordem: v1 com occurred_at mais novo, v3 com o mais antigo — só a versão ordena
+    const seeds = [
+      { version: 1, occurredAt: new Date(base - 1000) },
+      { version: 2, occurredAt: new Date(base - 2000) },
+      { version: 3, occurredAt: new Date(base - 3000) },
+    ];
+    for (const s of seeds) {
+      const id = crypto.randomUUID();
+      const payload = {
+        eventId: id,
+        eventType: 'WalletBalanceChanged',
+        aggregateId: walletId,
+        correlationId: 'c1',
+        occurredAt: s.occurredAt.toISOString(),
+        version: 1,
+        data: { walletId, walletVersion: s.version },
+      };
+      await sql(
+        `INSERT INTO outbox_messages (id, aggregate_id, event_type, payload, occurred_at, attempts, next_attempt_at, wallet_version)
+         VALUES (?, ?, 'WalletBalanceChanged', ?::JSONB, ?, 0, ?, ?)`,
+        [id, walletId, JSON.stringify(payload), s.occurredAt, clock.now(), s.version],
+      );
+    }
+
+    expect(await drain(newPublisher(clock))).toBe(3);
+    const received = await receiveEvents(3);
+    const versions = received.map((r) => (r.body.data as { walletVersion: number }).walletVersion);
+    expect(versions).toEqual([1, 2, 3]);
+  });
+
   test('a second run does not republish what was already published', async () => {
     const clock = new FakeClock(new Date());
     await seedOutbox(3, clock.now());
@@ -232,9 +291,16 @@ describe('outbox publisher', () => {
     const [failing, ...others] = await seedOutbox(3, clock.now(), 3);
     const real = new SqsEventPublisher(sqs, config);
     const flaky: EventPublisher = {
-      publish: async (message: OutboxMessage) => {
-        if (message.id === failing?.id) throw new Error(`sqs unavailable ${'x'.repeat(1000)}`);
-        await real.publish(message);
+      publishBatch: async (messages) => {
+        const toSend = messages.filter((m) => m.id !== failing?.id);
+        const { published, failed } = await real.publishBatch(toSend);
+        return {
+          published,
+          failed: [
+            ...failed,
+            ...(failing ? [{ id: failing.id, error: `sqs unavailable ${'x'.repeat(1000)}` }] : []),
+          ],
+        };
       },
     };
 
@@ -322,34 +388,36 @@ describe('outbox publisher', () => {
     expect(row?.last_error).toBeNull();
   });
 
-  test('a failure stops its wallet for the cycle; next cycle publishes the wallet in order', async () => {
+  test('a failure reschedules the message and does not block the rest of the batch', async () => {
     const clock = new FakeClock(new Date());
-    const [first, second] = await seedOutbox(2, clock.now());
+    const [first] = await seedOutbox(2, clock.now());
     const real = new SqsEventPublisher(sqs, config);
     let failOnce = true;
     const flaky: EventPublisher = {
-      publish: async (message: OutboxMessage) => {
-        if (message.id === first?.id && failOnce) {
-          failOnce = false;
-          throw new Error('sqs unavailable');
-        }
-        await real.publish(message);
+      publishBatch: async (messages) => {
+        const failNow = failOnce && messages.some((m) => m.id === first?.id);
+        if (failNow) failOnce = false;
+        const toSend = failNow ? messages.filter((m) => m.id !== first?.id) : messages;
+        const { published, failed } = await real.publishBatch(toSend);
+        return {
+          published,
+          failed: [
+            ...failed,
+            ...(failNow ? [{ id: first?.id as string, error: 'sqs unavailable' }] : []),
+          ],
+        };
       },
     };
     const useCase = newPublisher(clock, flaky);
 
-    expect(await useCase.runOnce()).toMatchObject({ published: 0, failed: 1 });
-    expect(await receiveEvents(1, 1)).toHaveLength(0);
+    expect(await useCase.runOnce()).toMatchObject({ published: 1, failed: 1 });
+    expect(await receiveEvents(1)).toHaveLength(1);
     const rows = await outboxRows();
     expect(rows.map((r) => r.attempts)).toEqual([1, 0]);
-    expect(rows[1]?.next_attempt_at).toEqual(rows[0]?.next_attempt_at as Date);
 
     clock.advance(LEASE_MS);
-    expect(await useCase.runOnce()).toMatchObject({ published: 2, failed: 0 });
-    expect((await receiveEvents(2)).map((r) => r.eventId)).toEqual([
-      first?.id as string,
-      second?.id as string,
-    ]);
+    expect(await useCase.runOnce()).toMatchObject({ published: 1, failed: 0 });
+    expect((await receiveEvents(1)).map((r) => r.eventId)).toEqual([first?.id as string]);
   });
 
   test('markPublished is idempotent: a late second mark does not fail nor overwrite the first', async () => {
