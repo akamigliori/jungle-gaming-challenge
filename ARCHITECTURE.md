@@ -428,15 +428,15 @@ da transação: o envio só acontece depois, a partir do que já está confirmad
    "Ordem estrita por wallet".
 2. **Publica** fora de qualquer transação, em `wagering-events.fifo`, com
    `MessageGroupId = aggregateId` (a wallet) e `MessageDeduplicationId = eventId`; o corpo é o
-   envelope JSON gravado no `payload`. Eventos da mesma wallet saem um de cada vez, na ordem do
-   lote; wallets diferentes saem em paralelo.
-3. **Registra** o resultado, em escritas curtas e separadas: sucesso →
+   envelope JSON gravado no `payload`. O lote inteiro é enviado em chamadas de até 10
+   (`SendMessageBatch`): menos round-trips ao SQS do que um `SendMessage` por evento.
+3. **Registra** o resultado por entrada, em escritas curtas e separadas: sucesso →
    `UPDATE ... SET published_at = $agora WHERE id = $id AND published_at IS NULL`; falha →
    `attempts + 1`, `next_attempt_at` com backoff exponencial e jitter (1 s, 2 s, 4 s ... até 5 min)
-   e `last_error` (até 500 caracteres). Uma falha não impede as outras wallets do lote, mas para a
-   wallet dela neste ciclo: as mensagens seguintes da mesma wallet são adiadas para o mesmo
-   horário da nova tentativa, sem contar tentativa, para não saírem antes da que falhou.
-   As duas escritas só valem enquanto a reserva ainda é de quem escreve
+   e `last_error` (até 500 caracteres). Uma entrada falha não impede as demais do lote; se a chamada
+   em lote nem chega a acontecer (rede), o lote inteiro é reagendado. A ordem por wallet continua
+   garantida pelo claim (cabeça por wallet), não por este código.
+   As escritas só valem enquanto a reserva ainda é de quem escreve
    (`next_attempt_at <= fim do lease reservado`): se o lease venceu e outra instância reservou a
    linha de novo, uma falha atrasada não sobrescreve o lease nem o `attempts` dela.
 
@@ -474,14 +474,14 @@ publishers marcando a mesma linha.
 
 Os testes de integração (`test/integration/outbox-publisher.test.ts`, Postgres e LocalStack reais)
 cobrem: publicação única e marcação; segunda execução não republica; falha no envio
-(`attempts = 1`, nova tentativa no futuro, `last_error`, demais wallets publicadas); falha parando
-a wallet no ciclo e publicando-a em ordem no seguinte; falha atrasada que não sobrescreve a reserva
-de outra instância; dois
+(`attempts = 1`, nova tentativa no futuro, `last_error`, demais wallets publicadas); uma entrada
+falha sem bloquear o resto do lote e é publicada no ciclo seguinte; falha atrasada que não
+sobrescreve a reserva de outra instância; dois
 publishers concorrentes sobre 100 eventos (todos recebidos, cada linha reservada por um único
 publisher, nenhuma pendente); reserva abandonada não é pega antes do lease e é publicada depois; a
 cabeça por wallet (a v2 não é reivindicada antes de a v1 publicar) e a ordem estrita por
-`wallet_version` mesmo com `occurred_at` fora de ordem; e
-o worker ligado publicando os eventos de uma wallet nova de ponta a ponta. Os testes controlam o
+`wallet_version` mesmo com `occurred_at` fora de ordem; o envio em lotes de até 10 (unit);
+e o worker ligado publicando os eventos de uma wallet nova de ponta a ponta. Os testes controlam o
 relógio (`Clock` injetado) para avançar além do lease sem esperar.
 
 **Ordem estrita por wallet.** A coluna `wallet_version` da outbox (preenchida só em
@@ -1052,7 +1052,4 @@ diz o que custaria e como entraria.
   subindo, conflitos de lock) e um dashboard: hoje só há o endpoint de coleta.
 - **Usuário de banco só com DML** para a aplicação (`SELECT`, `INSERT`, `UPDATE`), sem `TRUNCATE`
   nem DDL; as migrations rodam com outro usuário.
-- **Publicar a outbox em lote** (`SendMessageBatch`) e perfilar o publisher: é o gargalo
-  observado no teste de carga (seção 16). Junto, uma métrica de espera por conexão do pool para
-  decidir o tamanho dele (hoje 10 por instância).
 - **Retenção da outbox**: job que apaga as linhas já publicadas depois de um prazo.
