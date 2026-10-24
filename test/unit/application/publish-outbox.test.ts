@@ -64,12 +64,6 @@ class RecordingOutbox implements OutboxRepository {
       claimedUntil,
     });
   }
-
-  async postpone(ids: string[], p: { until: Date; claimedUntil: Date }): Promise<void> {
-    this.postponed.push({ ids, ...p });
-  }
-
-  postponed: { ids: string[]; until: Date; claimedUntil: Date }[] = [];
 }
 
 function useCase(outbox: OutboxRepository, publisher: EventPublisher) {

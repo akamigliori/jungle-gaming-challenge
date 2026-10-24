@@ -89,19 +89,6 @@ export class MikroOrmOutboxRepository implements OutboxRepository {
       ],
     );
   }
-
-  async postpone(
-    ids: string[],
-    { until, claimedUntil }: { until: Date; claimedUntil: Date },
-  ): Promise<void> {
-    if (ids.length === 0) return;
-    await this.em.execute(
-      `UPDATE outbox_messages
-          SET next_attempt_at = ?
-        WHERE id IN (?) AND published_at IS NULL AND next_attempt_at <= ?`,
-      [until, ids, claimedUntil],
-    );
-  }
 }
 
 /** Linha crua do `SELECT`: o driver devolve `TIMESTAMPTZ` como texto em consultas SQL diretas. */

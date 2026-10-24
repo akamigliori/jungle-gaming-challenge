@@ -29,12 +29,6 @@ export interface OutboxRepository {
    * altera nada.
    */
   reschedule(message: OutboxMessage, p: { error: string; claimedUntil: Date }): Promise<void>;
-
-  /**
-   * Adia mensagens reservadas que não foram tentadas para `until`, sem contar tentativa; mesma
-   * condição de reserva de `reschedule`.
-   */
-  postpone(ids: string[], p: { until: Date; claimedUntil: Date }): Promise<void>;
 }
 
 export const OUTBOX_REPOSITORY = Symbol('OUTBOX_REPOSITORY');
