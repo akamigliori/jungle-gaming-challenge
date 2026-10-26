@@ -108,4 +108,45 @@ describe('journal history upgrade', () => {
     expect(await financialState()).toEqual(before);
     expect((await t.app.get(ReconcileWalletUseCase).execute(walletId)).consistent).toBe(true);
   });
+
+  test('an already applied journal migration is repaired without replacing entries or losing precision', async () => {
+    const legacyWallet = await seedHistory('USD', '999999999999999999.99');
+    const migrator = orm.getMigrator();
+    await migrator.down({ to: 'Migration20261025000000_double_entry_journal' });
+    await migrator.up({ to: 'Migration20261028000000_pending_reference_claim_token' });
+    expect(await sql('SELECT id FROM journal_entries')).toEqual([]);
+
+    const currentWallet = await seedHistory();
+    const existing = await sql('SELECT * FROM journal_entries ORDER BY id');
+    const before = await financialState();
+    await migrator.up();
+
+    expect(await sql(`SELECT * FROM journal_entries WHERE currency = 'BRL' ORDER BY id`)).toEqual(
+      existing,
+    );
+    expect(await financialState()).toEqual(before);
+    expect(
+      await sql(`
+      SELECT currency, SUM(signed_amount)::TEXT AS net FROM (
+        SELECT currency, CASE direction WHEN 'CREDIT' THEN amount ELSE -amount END AS signed_amount
+          FROM wallet_ledger_entries
+        UNION ALL
+        SELECT currency, CASE direction WHEN 'CREDIT' THEN amount ELSE -amount END
+          FROM journal_entries
+      ) entries GROUP BY currency ORDER BY currency`),
+    ).toEqual([
+      { currency: 'BRL', net: '0.00' },
+      { currency: 'USD', net: '0.00' },
+    ]);
+    for (const walletId of [legacyWallet, currentWallet]) {
+      expect((await t.app.get(ReconcileWalletUseCase).execute(walletId)).consistent).toBe(true);
+    }
+
+    const journal = await sql('SELECT * FROM journal_entries ORDER BY id');
+    expect(journal).toHaveLength(4);
+    await migrator.down({ migrations: ['Migration20261029000000_journal_history_backfill'] });
+    expect(await sql('SELECT * FROM journal_entries ORDER BY id')).toEqual(journal);
+    await migrator.up();
+    expect(await sql('SELECT * FROM journal_entries ORDER BY id')).toEqual(journal);
+  });
 });
