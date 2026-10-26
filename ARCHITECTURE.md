@@ -935,6 +935,10 @@ entre ciclos do publisher e não altera o caminho HTTP.
   (88–115 s). Agora o ciclo encadeia na hora enquanto publica algo, e o que sobra drena em ~5 s; o
   limite de uma versão por wallet continua sendo o custo consciente da garantia de ordem (seção 11),
   mas não se traduz mais em espera artificial entre ciclos.
+- **O SQS emulado não é o gargalo nesta escala.** Medido isoladamente (`bun run bench:sqs`, sem banco
+  nem aplicação), o LocalStack publica ~2.000–2.150 msg/s em lotes de 10 — cerca de 4× a vazão que o
+  publisher de fato atinge no teste de carga (~450–540 eventos/s) — e consome ~750 msg/s com um
+  consumidor. O teto está no claim/banco (uma versão por wallet por ciclo), não no envio.
 - **Vazão e latência do caminho HTTP ficaram estáveis.** ~266 req/s e p50 ~90 ms, sem erros, dentro
   da variação desta máquina (gerador e sistema disputam CPU). A medição não permite atribuir ganho
   nem perda ao caminho HTTP.
@@ -1120,8 +1124,6 @@ diz o que custaria e como entraria.
   (seção 11), o que acelera a cauda; o que resta é a vazão por wallet quente, limitada a uma versão
   por ciclo de claim (seção 16). Candidato: permitir um prefixo contíguo de versões por wallet no
   claim, mantendo a ordem estrita e provando isso no banco.
-- **Medir o custo do SQS emulado (LocalStack) isoladamente**, para separar quanto da latência de
-  publicação é do serviço emulado e quanto é do banco/aplicação.
 - **Restam poucos round-trips no caminho HTTP** (cerca de uma dezena de instruções por transação).
   Mover o `SET LOCAL lock_timeout` para o nível da conexão foi avaliado e rejeitado (a seção 17
   explica o porquê); outras oportunidades, se o teste de carga as apontar.

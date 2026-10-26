@@ -329,6 +329,7 @@ mensagens novas na DLQ e mais de 10 conflitos de lock em 5 min. O Prometheus gua
 | `bun run test:concurrency`    | testes de concorrência (`test/concurrency`, requisições HTTP simultâneas contra Postgres real)                                                                                                        |
 | `bun run test:multi-instance` | três processos da aplicação contra o mesmo Postgres e as mesmas filas, com `SIGKILL`, `SIGTERM` e reinício no meio do processamento (`test/multi-instance`); o mais pesado, rode por último e sozinho |
 | `bun run test:load`           | teste de carga contra as três instâncias do Compose, com reconciliação de todas as wallets ao final (ver "Teste de carga")                                                                            |
+| `bun run bench:sqs`           | mede o custo do SQS emulado (LocalStack) isoladamente: publicação e consumo direto no emulador, sem banco nem aplicação (ver "Custo do SQS isolado")                                                  |
 | `bun run demo`                | roteiro narrado contra a API já no ar (ver "Demonstração")                                                                                                                                            |
 | `bun run migration:up`        | aplica as migrations pendentes                                                                                                                                                                        |
 | `bun run migration:down`      | reverte a última migration                                                                                                                                                                            |
@@ -381,6 +382,24 @@ resultados e análise estão na seção 16 do `ARCHITECTURE.md`. Não grava arqu
 
 O gerador roda na mesma máquina do sistema testado e disputa CPU com ele: os números servem para
 comparar execuções nesta máquina, não como capacidade.
+
+## Custo do SQS isolado
+
+`bun run bench:sqs` mede o emulador sozinho — envia e consome direto no LocalStack, numa fila FIFO
+própria (criada e apagada por execução), sem banco nem aplicação. Serve para separar quanto da
+latência de publicação é do SQS e quanto é do claim/banco no teste de carga.
+
+```bash
+bun run bench:sqs                                  # 2.000 mensagens, concorrência 5, 100 grupos
+bun run bench:sqs --messages 5000 --concurrency 10 --groups 500
+bun run bench:sqs --json                           # resumo em JSON no stdout (o texto vai para o stderr)
+```
+
+Nesta máquina (LocalStack), 2.000 mensagens em lotes de 10: publicação **~2.000–2.150 msg/s**
+(p50 ~22 ms por lote) e consumo **~750 msg/s** (p50 ~13 ms), zero erros. O teto de publicação do
+emulador fica ~4× acima da vazão que a aplicação de fato publica no teste de carga (~450–540
+eventos/s), então nessa escala o gargalo é o claim/banco, não o SQS. Vale para o LocalStack local,
+não para a AWS.
 
 ## CI
 

@@ -21,6 +21,11 @@ const ALLOWED: { file: string; pattern: string; reason: string }[] = [
     pattern: '.toFixed(',
     reason: 'formatação com escala fixa dentro do próprio Money (decimal.js)',
   },
+  {
+    file: 'scripts/sqs-bench.ts',
+    pattern: 'Number(',
+    reason: 'número de mensagens, concorrência e grupos do benchmark, não dinheiro',
+  },
 ];
 
 const isAllowed = (file: string, pattern: string) =>
