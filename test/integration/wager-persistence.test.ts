@@ -230,6 +230,39 @@ describe('WagerTransactionRepository lookups', () => {
     expect(found).toEqual([null, null]);
   });
 
+  test('findByIdempotency rehydrates and the key takes precedence over the external id', async () => {
+    const wallet = await createWallet();
+    const tx = newTransaction(wallet);
+    tx.markProcessed({ at: new Date(), balanceAfter: money('75.00'), walletVersionAfter: 2 });
+    await transactions.add(tx);
+
+    const { byKey, byExternalId } = await runner.run(() =>
+      transactions.findByIdempotency('provider-a', 'provider-a:ext-1', 'ext-1'),
+    );
+
+    expect(byKey?.id).toBe(tx.id);
+    expect(byKey?.balanceAfter?.toJSON().amount).toBe('75.00');
+    expect(byExternalId).toBeNull();
+  });
+
+  test('findByIdempotency returns byKey and byExternalId for distinct transactions', async () => {
+    const wallet = await createWallet();
+    const byKeyTx = newTransaction(wallet);
+    await transactions.add(byKeyTx);
+    const byExternalTx = newTransaction(wallet, {
+      externalTransactionId: 'ext-2',
+      idempotencyKey: 'provider-a:ext-2',
+    });
+    await transactions.add(byExternalTx);
+
+    const match = await runner.run(() =>
+      transactions.findByIdempotency('provider-a', 'provider-a:ext-1', 'ext-2'),
+    );
+
+    expect(match.byKey?.id).toBe(byKeyTx.id);
+    expect(match.byExternalId?.id).toBe(byExternalTx.id);
+  });
+
   test('isReversed is false until a PROCESSED reversal points at the transaction', async () => {
     const wallet = await createWallet();
     const bet = newTransaction(wallet);

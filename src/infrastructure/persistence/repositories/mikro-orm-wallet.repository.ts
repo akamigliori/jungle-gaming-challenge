@@ -32,7 +32,7 @@ export class MikroOrmWalletRepository implements WalletRepository {
   /**
    * `lock_timeout` e `FOR UPDATE` passam pelo `EntityManager` global, que dentro de
    * `TransactionRunner.run` usa a conexão da transação: o lock dura até o commit/rollback.
-   * `SET LOCAL` também vale só até o fim da transação.
+   * `SET LOCAL` vale só até o fim da transação (não vaza para outras consultas na conexão).
    */
   async lockById(id: string): Promise<Wallet | null> {
     await this.em.execute(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT}'`);

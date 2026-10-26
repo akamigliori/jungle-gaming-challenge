@@ -156,6 +156,7 @@ function newPublisher(clock: Clock, publisher?: EventPublisher, batchSize = 50) 
     metrics: noopMetrics,
     batchSize,
     leaseMs: LEASE_MS,
+    concurrency: 5,
   });
 }
 

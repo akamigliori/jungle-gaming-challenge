@@ -50,6 +50,29 @@ export class MikroOrmWagerTransactionRepository implements WagerTransactionRepos
     return record ? toDomain(record) : null;
   }
 
+  /**
+   * Uma leitura para as duas consultas de idempotência: `provider_id = ? AND (idempotency_key = ?
+   * OR external_transaction_id = ?)`. A chave tem precedência — uma linha que casa com os dois
+   * campos sai em `byKey`, não em `byExternalId`.
+   */
+  async findByIdempotency(
+    providerId: string,
+    idempotencyKey: string,
+    externalTransactionId: string,
+  ): Promise<{ byKey: WagerTransaction | null; byExternalId: WagerTransaction | null }> {
+    const records = await this.em.find(WagerTransactionSchema, {
+      providerId,
+      $or: [{ idempotencyKey }, { externalTransactionId }],
+    });
+    let byKey: WagerTransaction | null = null;
+    let byExternalId: WagerTransaction | null = null;
+    for (const record of records) {
+      if (record.idempotencyKey === idempotencyKey) byKey = toDomain(record);
+      else byExternalId = toDomain(record);
+    }
+    return { byKey, byExternalId };
+  }
+
   async isReversed(transactionId: string): Promise<boolean> {
     const count = await this.em.count(WagerTransactionSchema, {
       referenceTransactionId: transactionId,

@@ -399,6 +399,7 @@ vê-los, defina `TEST_LOG_LEVEL` (ex.: `TEST_LOG_LEVEL=info bun run test:integra
 | `OUTBOX_POLL_INTERVAL_MS`            | `250`                         | intervalo entre ciclos do publisher quando não há lote cheio                                                                             |
 | `OUTBOX_BATCH_SIZE`                  | `50`                          | máximo de eventos reservados por ciclo                                                                                                   |
 | `OUTBOX_LEASE_MS`                    | `30000`                       | prazo da reserva de um lote; se a instância morrer, outra o assume depois disso                                                          |
+| `OUTBOX_PUBLISH_CONCURRENCY`         | `5`                           | máximo de chamadas `SendMessageBatch` simultâneas num ciclo do publisher                                                                 |
 | `OUTBOX_RETENTION_ENABLED`           | `true`                        | liga o worker que apaga eventos publicados antigos (`false` desliga; nos testes de integração o padrão é `false`)                        |
 | `OUTBOX_RETENTION_POLL_INTERVAL_MS`  | `60000`                       | intervalo entre ciclos do worker de retenção                                                                                             |
 | `OUTBOX_RETENTION_MAX_AGE_MS`        | `604800000` (7 dias)          | eventos publicados há mais tempo que isto são apagados                                                                                   |

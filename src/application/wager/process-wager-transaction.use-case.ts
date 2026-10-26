@@ -242,7 +242,11 @@ export class ProcessWagerTransactionUseCase {
     const { transactions } = this.deps;
     const { cmd, payloadHash } = wager;
 
-    const byKey = await transactions.findByIdempotencyKey(cmd.providerId, cmd.idempotencyKey);
+    const { byKey, byExternalId } = await transactions.findByIdempotency(
+      cmd.providerId,
+      cmd.idempotencyKey,
+      cmd.externalTransactionId,
+    );
     if (byKey) {
       if (!byKey.matchesPayload(payloadHash)) {
         this.deps.metrics.duplicateDetected('idempotency_conflict');
@@ -250,10 +254,6 @@ export class ProcessWagerTransactionUseCase {
       }
       return byKey;
     }
-    const byExternalId = await transactions.findByExternalId(
-      cmd.providerId,
-      cmd.externalTransactionId,
-    );
     if (byExternalId) {
       this.deps.metrics.duplicateDetected('idempotency_conflict');
       throw new IdempotencyConflictError(
