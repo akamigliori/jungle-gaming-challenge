@@ -1,0 +1,45 @@
+groups:
+  - name: wagering
+    rules:
+      - alert: WageringInstanceDown
+        expr: up{job="wagering"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Instância do wagering fora do ar"
+          description: "{{ $labels.instance }} não responde ao scrape há mais de 1 minuto."
+
+      - alert: WageringOutboxLagHigh
+        expr: max(wagering_outbox_lag_seconds{job="wagering"}) > 60
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Lag da outbox alto"
+          description: "O evento não publicado mais antigo tem mais de 60 s ({{ $value }} s)."
+
+      - alert: WageringOutboxBacklogHigh
+        expr: max(wagering_outbox_pending{job="wagering"}) > 5000
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Backlog da outbox alto"
+          description: "Há {{ $value }} eventos não publicados."
+
+      - alert: WageringDlqMessages
+        expr: sum(increase(wagering_dlq_messages_total{job="wagering"}[5m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Mensagens na DLQ"
+          description: "Novas mensagens foram para a DLQ nos últimos 5 minutos."
+
+      - alert: WageringLockConflicts
+        expr: sum(increase(wagering_lock_conflicts_total{job="wagering"}[5m])) > 10
+        labels:
+          severity: warning
+        annotations:
+          summary: "Muitos conflitos de lock"
+          description: "Mais de 10 erros transitórios de banco em 5 minutos."

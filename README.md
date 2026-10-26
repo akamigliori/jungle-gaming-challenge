@@ -298,6 +298,22 @@ bun run start
 Os clients são `provider-a` e `provider-b` (`wagers:submit`, `wagers:read`) e `backoffice`
 (`wallets:manage`), todos `client_credentials`. Detalhes em [ARCHITECTURE.md, seção 14](ARCHITECTURE.md).
 
+### Observabilidade (opcional)
+
+O profile `observability` sobe o Prometheus (coleta o `/metrics` das três instâncias e avalia as
+regras de alerta) e o Grafana com o dashboard provisionado. Não há Alertmanager: o disparo aparece
+no Prometheus e no Grafana.
+
+```bash
+docker compose --profile app --profile observability up -d --build --wait
+# Grafana:    http://localhost:3000  (admin/admin) → dashboard "Wagering — visão geral"
+# Prometheus: http://localhost:9090  (Alerts e Targets)
+```
+
+Alertas: instância fora do ar (`up == 0`), lag da outbox acima de 60 s, backlog acima de 5.000,
+mensagens novas na DLQ e mais de 10 conflitos de lock em 5 min. O Prometheus guarda 6 h de séries
+(256 MB) e o Grafana roda com 384 MB.
+
 ## Comandos
 
 | Comando                       | O que faz                                                                                                                                                                                             |
