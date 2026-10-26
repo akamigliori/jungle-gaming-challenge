@@ -25,6 +25,8 @@ export interface AppConfig {
     pollIntervalMs: number;
     batchSize: number;
     leaseMs: number;
+    /** Máximo de chamadas `SendMessageBatch` simultâneas num ciclo. */
+    concurrency: number;
   };
   outboxRetention: {
     enabled: boolean;
@@ -92,6 +94,7 @@ const fieldsSchema = z.object({
   OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(250),
   OUTBOX_BATCH_SIZE: z.coerce.number().int().positive().max(1000).default(50),
   OUTBOX_LEASE_MS: z.coerce.number().int().positive().default(30_000),
+  OUTBOX_PUBLISH_CONCURRENCY: z.coerce.number().int().positive().max(50).default(5),
   OUTBOX_RETENTION_ENABLED: z.stringbool().default(true),
   OUTBOX_RETENTION_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
   OUTBOX_RETENTION_MAX_AGE_MS: z.coerce
@@ -189,6 +192,7 @@ export function loadConfig(env: Env = process.env): AppConfig {
       pollIntervalMs: e.OUTBOX_POLL_INTERVAL_MS,
       batchSize: e.OUTBOX_BATCH_SIZE,
       leaseMs: e.OUTBOX_LEASE_MS,
+      concurrency: e.OUTBOX_PUBLISH_CONCURRENCY,
     },
     outboxRetention: {
       enabled: e.OUTBOX_RETENTION_ENABLED,

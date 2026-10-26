@@ -2,12 +2,13 @@ import { describe, expect, test } from 'bun:test';
 import { loadConfig } from '../../../src/infrastructure/config/config';
 
 describe('loadConfig outbox publisher', () => {
-  test('defaults: enabled, 250 ms poll, batch of 50, 30 s lease', () => {
+  test('defaults: enabled, 250 ms poll, batch of 50, 30 s lease, 5 concurrent sends', () => {
     expect(loadConfig({}).outboxPublisher).toEqual({
       enabled: true,
       pollIntervalMs: 250,
       batchSize: 50,
       leaseMs: 30_000,
+      concurrency: 5,
     });
   });
 
@@ -15,10 +16,16 @@ describe('loadConfig outbox publisher', () => {
     expect(loadConfig({ OUTBOX_PUBLISHER_ENABLED: 'false' }).outboxPublisher.enabled).toBe(false);
   });
 
+  test('concurrency comes from the environment', () => {
+    expect(loadConfig({ OUTBOX_PUBLISH_CONCURRENCY: '3' }).outboxPublisher.concurrency).toBe(3);
+  });
+
   test('invalid values are rejected', () => {
     expect(() => loadConfig({ OUTBOX_PUBLISHER_ENABLED: 'maybe' })).toThrow();
     expect(() => loadConfig({ OUTBOX_BATCH_SIZE: '0' })).toThrow();
     expect(() => loadConfig({ OUTBOX_LEASE_MS: '-1' })).toThrow();
+    expect(() => loadConfig({ OUTBOX_PUBLISH_CONCURRENCY: '0' })).toThrow();
+    expect(() => loadConfig({ OUTBOX_PUBLISH_CONCURRENCY: '51' })).toThrow();
   });
 });
 

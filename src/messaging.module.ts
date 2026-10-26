@@ -33,6 +33,7 @@ import { OutboxRetentionWorker } from './infrastructure/workers/outbox-retention
           metrics,
           batchSize: config.outboxPublisher.batchSize,
           leaseMs: config.outboxPublisher.leaseMs,
+          concurrency: config.outboxPublisher.concurrency,
         }),
     },
     OutboxPublisherWorker,

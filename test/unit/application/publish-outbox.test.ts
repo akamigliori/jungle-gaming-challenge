@@ -71,7 +71,7 @@ class RecordingOutbox implements OutboxRepository {
   }
 }
 
-function useCase(outbox: OutboxRepository, publisher: EventPublisher) {
+function useCase(outbox: OutboxRepository, publisher: EventPublisher, concurrency = 5) {
   return new PublishOutboxUseCase({
     outbox,
     publisher,
@@ -79,6 +79,7 @@ function useCase(outbox: OutboxRepository, publisher: EventPublisher) {
     metrics: noopMetrics,
     batchSize: 50,
     leaseMs: 30_000,
+    concurrency,
     random: () => 1,
   });
 }
@@ -162,6 +163,29 @@ describe('PublishOutboxUseCase', () => {
     }).runOnce();
 
     expect(chunkSizes).toEqual([10, 10, 5]);
+    expect(outbox.published).toHaveLength(25);
+  });
+
+  test('never exceeds the configured concurrency of in-flight sends', async () => {
+    const messages = Array.from({ length: 25 }, (_, i) => message(`m${i}`, `w${i}`));
+    const outbox = new RecordingOutbox(messages);
+    let active = 0;
+    let maxActive = 0;
+    await useCase(
+      outbox,
+      {
+        publishBatch: async (msgs) => {
+          active += 1;
+          maxActive = Math.max(maxActive, active);
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          active -= 1;
+          return { published: msgs.map((m) => m.id), failed: [] };
+        },
+      },
+      2,
+    ).runOnce();
+
+    expect(maxActive).toBe(2);
     expect(outbox.published).toHaveLength(25);
   });
 
