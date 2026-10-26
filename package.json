@@ -16,6 +16,7 @@
     "test:multi-instance": "bun test test/multi-instance --timeout 180000",
     "demo": "bun scripts/demo.ts",
     "test:load": "bun scripts/load.ts",
+    "bench:sqs": "bun scripts/sqs-bench.ts",
     "migration:up": "bun scripts/migrate.ts up",
     "migration:down": "bun scripts/migrate.ts down"
   },
