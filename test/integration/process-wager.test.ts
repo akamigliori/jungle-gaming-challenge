@@ -142,6 +142,7 @@ function buildUseCase(over: Partial<ProcessWagerDeps>): ProcessWagerTransactionU
     isTransient: isTransientDbError,
     isUniqueViolation: isWagerUniqueViolation,
     referenceRetry: DEFAULT_REFERENCE_RETRY,
+    auditFailure: async () => {},
     ...over,
   });
 }

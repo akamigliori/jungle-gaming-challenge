@@ -1,5 +1,9 @@
 import { InboxMessage } from '../../domain/messaging/inbox-message';
-import { InvalidPayloadError, InvariantViolationError } from '../../domain/shared/domain-error';
+import {
+  DomainError,
+  InvalidPayloadError,
+  InvariantViolationError,
+} from '../../domain/shared/domain-error';
 import { Money, type MoneyProps } from '../../domain/shared/money';
 import type { ReferenceRetryPolicy } from '../../domain/wager/reference-retry';
 import { decideWager } from '../../domain/wager/wager-decision';
@@ -13,14 +17,19 @@ import type { JournalRepository } from '../ports/journal.repository';
 import type { LedgerRepository } from '../ports/ledger.repository';
 import type { Metrics, ProcessingChannel, ProcessingOutcome } from '../ports/metrics';
 import type { OutboxRepository } from '../ports/outbox.repository';
+import type {
+  SubmissionChannel,
+  SubmissionFailureInput,
+} from '../ports/submission-failure.repository';
 import type { TransactionRunner } from '../ports/transaction-runner';
 import type { WagerTransactionRepository } from '../ports/wager-transaction.repository';
 import type { WalletRepository } from '../ports/wallet.repository';
 import { retryTransient } from '../shared/retry-transient';
 import { WalletNotFoundError } from '../wallet/wallet-errors';
 import { findReference } from './find-reference';
-import { computePayloadHash, type WagerPayload } from './payload-hash';
+import { auditPayloadHash, computePayloadHash, type WagerPayload } from './payload-hash';
 import { recordDecision } from './record-decision';
+import { classifySubmissionFailure } from './submission-failure-classification';
 import { IdempotencyConflictError } from './wager-errors';
 
 export interface ProcessWagerCommand {
@@ -62,6 +71,8 @@ export interface ProcessWagerDeps {
   isUniqueViolation: (error: unknown) => boolean;
   /** Backoff da referência pendente: define a primeira espera de quem fica `PENDING_REFERENCE`. */
   referenceRetry: ReferenceRetryPolicy;
+  /** Auditoria best-effort das recusas que não viram resultado de negócio. */
+  auditFailure: (input: SubmissionFailureInput) => Promise<void>;
 }
 
 /** Política de novas tentativas em falhas transitórias: 3 execuções, espera base de 50 ms. */
@@ -113,10 +124,47 @@ export class ProcessWagerTransactionUseCase {
       return result;
     } catch (error) {
       if (error instanceof IdempotencyConflictError) outcome = 'conflict';
+      // auditoria best-effort, fora da transação que falhou; nunca muda o erro original
+      try {
+        await this.auditSubmissionFailure(cmd, channel, error);
+      } catch {
+        // nunca mascara o erro que o cliente precisa ver
+      }
       throw error;
     } finally {
       metrics.processingTimed(channel, outcome, (performance.now() - startedAt) / 1000);
     }
+  }
+
+  /**
+   * Registra a recusa que não virou resultado de negócio. Rejeições de negócio (`REJECTED`) já são
+   * persistidas como transação e não passam por aqui; erros de programação e transitórios também
+   * ficam de fora. O hash é o da idempotência quando o dinheiro é válido.
+   */
+  private async auditSubmissionFailure(
+    cmd: ProcessWagerCommand,
+    channel: ProcessingChannel,
+    error: unknown,
+  ): Promise<void> {
+    if (!(error instanceof DomainError)) return;
+    if (this.deps.isTransient(error)) return;
+    const classification = classifySubmissionFailure(error.code);
+    if (!classification) return;
+    const submissionChannel: SubmissionChannel = channel === 'sqs' ? 'SQS' : 'HTTP';
+    await this.deps.auditFailure({
+      channel: submissionChannel,
+      providerId: cmd.providerId,
+      externalTransactionId: cmd.externalTransactionId,
+      idempotencyKey: cmd.idempotencyKey,
+      walletId: cmd.walletId,
+      messageId: cmd.inbox?.messageId ?? null,
+      payloadHash: auditPayloadHash(payloadOf(cmd)),
+      reasonCode: error.code,
+      category: classification.category,
+      retryable: classification.retryable,
+      correlationId: cmd.correlationId,
+      detail: error.message,
+    });
   }
 
   /** Conta o resultado já commitado; devolve o desfecho para a latência. */
