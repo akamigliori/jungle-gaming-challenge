@@ -8,6 +8,7 @@ const TABLES = [
   'wallets',
   'inbox_messages',
   'outbox_messages',
+  'wager_submission_failures',
 ];
 
 /** Conecta ao banco de testes (wagering_test) e aplica as migrations pendentes. */

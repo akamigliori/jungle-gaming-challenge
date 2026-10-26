@@ -6,6 +6,10 @@ import { JOURNAL_REPOSITORY, type JournalRepository } from './application/ports/
 import { LEDGER_REPOSITORY, type LedgerRepository } from './application/ports/ledger.repository';
 import { METRICS, type Metrics } from './application/ports/metrics';
 import { OUTBOX_REPOSITORY, type OutboxRepository } from './application/ports/outbox.repository';
+import {
+  SUBMISSION_FAILURE_REPOSITORY,
+  type SubmissionFailureRepository,
+} from './application/ports/submission-failure.repository';
 import { TRANSACTION_RUNNER, type TransactionRunner } from './application/ports/transaction-runner';
 import {
   WAGER_TRANSACTION_REPOSITORY,
@@ -13,9 +17,11 @@ import {
 } from './application/ports/wager-transaction.repository';
 import { WALLET_REPOSITORY, type WalletRepository } from './application/ports/wallet.repository';
 import { ProcessWagerTransactionUseCase } from './application/wager/process-wager-transaction.use-case';
+import { RecordSubmissionFailureUseCase } from './application/wager/record-submission-failure.use-case';
 import { ResolvePendingReferenceUseCase } from './application/wager/resolve-pending-reference.use-case';
 import { APP_CONFIG, type AppConfig } from './infrastructure/config/config';
 import { isTransientDbError, isWagerUniqueViolation } from './infrastructure/persistence/pg-errors';
+import { SubmissionFailureQuery } from './infrastructure/persistence/queries/submission-failure.query';
 import { WagerTransactionQuery } from './infrastructure/persistence/queries/wager-transaction.query';
 import { PendingReferenceWorker } from './infrastructure/workers/pending-reference.worker';
 import { WageringController } from './interfaces/http/wagering/wagering.controller';
@@ -32,6 +38,17 @@ import { WagerTransactionsConsumer } from './interfaces/sqs/wager-transactions.c
   controllers: [WageringController],
   providers: [
     WagerTransactionQuery,
+    SubmissionFailureQuery,
+    {
+      provide: RecordSubmissionFailureUseCase,
+      inject: [TRANSACTION_RUNNER, SUBMISSION_FAILURE_REPOSITORY, ID_GENERATOR, CLOCK],
+      useFactory: (
+        transactionRunner: TransactionRunner,
+        failures: SubmissionFailureRepository,
+        ids: IdGenerator,
+        clock: Clock,
+      ) => new RecordSubmissionFailureUseCase({ transactionRunner, failures, ids, clock }),
+    },
     {
       provide: ProcessWagerTransactionUseCase,
       inject: [
@@ -46,6 +63,7 @@ import { WagerTransactionsConsumer } from './interfaces/sqs/wager-transactions.c
         CLOCK,
         METRICS,
         APP_CONFIG,
+        RecordSubmissionFailureUseCase,
       ],
       useFactory: (
         transactionRunner: TransactionRunner,
@@ -59,6 +77,7 @@ import { WagerTransactionsConsumer } from './interfaces/sqs/wager-transactions.c
         clock: Clock,
         metrics: Metrics,
         config: AppConfig,
+        recordFailure: RecordSubmissionFailureUseCase,
       ) =>
         new ProcessWagerTransactionUseCase({
           transactionRunner,
@@ -74,6 +93,7 @@ import { WagerTransactionsConsumer } from './interfaces/sqs/wager-transactions.c
           isTransient: isTransientDbError,
           isUniqueViolation: isWagerUniqueViolation,
           referenceRetry: config.pendingReference.retry,
+          auditFailure: (input) => recordFailure.execute(input),
         }),
     },
     {

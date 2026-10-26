@@ -38,3 +38,16 @@ export function computePayloadHash(p: WagerPayload): string {
     .update(canonicalJson({ ...p, money: Money.from(p.money).toJSON() }))
     .digest('hex');
 }
+
+/**
+ * Hash do payload para a **auditoria de recusas**: usa o mesmo hash normalizado da idempotência
+ * quando o dinheiro é válido; se o dinheiro é inválido (justamente o motivo da recusa), cai para o
+ * JSON canônico bruto, que não lança.
+ */
+export function auditPayloadHash(p: WagerPayload): string {
+  try {
+    return computePayloadHash(p);
+  } catch {
+    return createHash('sha256').update(canonicalJson(p)).digest('hex');
+  }
+}
