@@ -1,4 +1,4 @@
-import { EntityManager } from '@mikro-orm/postgresql';
+import { EntityManager, LockMode } from '@mikro-orm/postgresql';
 import { Injectable } from '@nestjs/common';
 import type {
   ClaimDuePendingReferencesParams,
@@ -28,6 +28,24 @@ export class MikroOrmWagerTransactionRepository implements WagerTransactionRepos
 
   async findById(id: string): Promise<WagerTransaction | null> {
     const record = await this.em.findOne(WagerTransactionSchema, { id });
+    return record ? toDomain(record) : null;
+  }
+
+  async lockClaimedPendingReference(
+    id: string,
+    claimToken: string,
+    at: Date,
+  ): Promise<WagerTransaction | null> {
+    const record = await this.em.findOne(
+      WagerTransactionSchema,
+      {
+        id,
+        status: 'PENDING_REFERENCE',
+        referenceClaimToken: claimToken,
+        nextReferenceAttemptAt: { $gt: at },
+      },
+      { lockMode: LockMode.PESSIMISTIC_WRITE, refresh: true },
+    );
     return record ? toDomain(record) : null;
   }
 
@@ -98,6 +116,7 @@ export class MikroOrmWagerTransactionRepository implements WagerTransactionRepos
         failureCode: record.failureCode,
         referenceAttempts: record.referenceAttempts,
         nextReferenceAttemptAt: record.nextReferenceAttemptAt,
+        referenceClaimToken: null,
         balanceAfter: record.balanceAfter,
         walletVersionAfter: record.walletVersionAfter,
         processedAt: record.processedAt,
@@ -121,7 +140,7 @@ export class MikroOrmWagerTransactionRepository implements WagerTransactionRepos
   }: WakeDependentsParams): Promise<void> {
     await this.em.execute(
       `UPDATE wager_transactions
-          SET next_reference_attempt_at = ?, updated_at = ?
+          SET next_reference_attempt_at = ?, updated_at = ?, reference_claim_token = NULL
         WHERE status = 'PENDING_REFERENCE'
           AND wallet_id = ?
           AND provider_id = ?
@@ -154,14 +173,28 @@ export class MikroOrmWagerTransactionRepository implements WagerTransactionRepos
       );
       if (due.length > 0) {
         // o lease é coordenação entre instâncias, não mudança de negócio: não toca em `updated_at`
-        await em.execute(
-          'UPDATE wager_transactions SET next_reference_attempt_at = ? WHERE id IN (?)',
+        const claimed = await em.execute<
+          { id: string; wallet_id: string; reference_claim_token: string }[]
+        >(
+          `UPDATE wager_transactions
+              SET next_reference_attempt_at = ?, reference_claim_token = gen_random_uuid()
+            WHERE id IN (?) RETURNING id, wallet_id, reference_claim_token`,
           [leaseUntil, due.map((row) => row.id)],
         );
+        const byId = new Map(claimed.map((row) => [row.id, row]));
+        return due.map((row) => {
+          const claim = byId.get(row.id);
+          if (!claim) throw new InvariantViolationError(`pending claim ${row.id} disappeared`);
+          return claim;
+        });
       }
-      return due;
+      return [];
     });
-    return rows.map((row) => ({ id: row.id, walletId: row.wallet_id }));
+    return rows.map((row) => ({
+      id: row.id,
+      walletId: row.wallet_id,
+      claimToken: row.reference_claim_token,
+    }));
   }
 }
 

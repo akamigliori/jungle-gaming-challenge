@@ -2,6 +2,10 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:tes
 import { LockWaitTimeoutException } from '@mikro-orm/core';
 import { EntityManager, type MikroORM } from '@mikro-orm/postgresql';
 import {
+  WAGER_TRANSACTION_REPOSITORY,
+  type WagerTransactionRepository,
+} from '../../src/application/ports/wager-transaction.repository';
+import {
   WALLET_REPOSITORY,
   type WalletRepository,
 } from '../../src/application/ports/wallet.repository';
@@ -99,6 +103,7 @@ describe('GET /metrics', () => {
     const before = await scrapeMetrics(t.baseUrl);
 
     expect(await submit(bet(walletId))).toBe(201);
+
     expect(await submit(bet(walletId))).toBe(201);
     expect(await submit(bet(walletId, '30.00'))).toBe(409);
 
@@ -139,13 +144,20 @@ describe('GET /metrics', () => {
     expect(refund.status).toBe(202);
     expect(await submit(bet(walletId))).toBe(201);
 
+    const [claim] = await t.app
+      .get<WagerTransactionRepository>(WAGER_TRANSACTION_REPOSITORY)
+      .claimDuePendingReferences({ now: new Date(), limit: 1, leaseMs: 30_000 });
+    if (!claim) throw new Error('pending not claimed');
+
     const resolved = await seriesDelta(
       t.baseUrl,
       'wagering_transactions_total{channel="worker",kind="REFUND",status="PROCESSED"}',
       () =>
-        t.app
-          .get(ResolvePendingReferenceUseCase)
-          .execute({ transactionId: refund.body.transactionId, walletId }),
+        t.app.get(ResolvePendingReferenceUseCase).execute({
+          transactionId: refund.body.transactionId,
+          walletId,
+          claimToken: claim.claimToken,
+        }),
     );
 
     expect(resolved).toBe(1);

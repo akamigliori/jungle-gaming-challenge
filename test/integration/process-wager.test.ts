@@ -459,6 +459,8 @@ describe('ProcessWagerTransactionUseCase — idempotency', () => {
           : real.findByIdempotency(p, k, e),
       isReversed: (id) => real.isReversed(id),
       findById: (id) => real.findById(id),
+      lockClaimedPendingReference: (id, token, at) =>
+        real.lockClaimedPendingReference(id, token, at),
       update: (tx, at) => real.update(tx, at),
       wakeDependents: (p) => real.wakeDependents(p),
       claimDuePendingReferences: (p) => real.claimDuePendingReferences(p),

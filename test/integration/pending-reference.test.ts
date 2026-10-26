@@ -377,6 +377,18 @@ describe('ResolvePendingReferenceUseCase', () => {
     });
   }
 
+  async function claimTarget(transactionId: string, walletId: string) {
+    await sql('UPDATE wager_transactions SET next_reference_attempt_at = NOW() WHERE id = ?', [
+      transactionId,
+    ]);
+    const claims = await t.app
+      .get<WagerTransactionRepository>(WAGER_TRANSACTION_REPOSITORY)
+      .claimDuePendingReferences({ now: new Date(), limit: 100, leaseMs: 30_000 });
+    const claim = claims.find((item) => item.id === transactionId);
+    if (!claim) throw new Error('pending not claimed');
+    return { transactionId, walletId, claimToken: claim.claimToken };
+  }
+
   test('an expired claim cannot consume another attempt after a second worker reschedules', async () => {
     const walletId = await createWallet();
     const refund = await submit(refundOf(walletId, 'bet-1'));
@@ -441,7 +453,7 @@ describe('ResolvePendingReferenceUseCase', () => {
     const walletId = await createWallet();
     const refund = await submit(refundOf(walletId, 'bet-1'));
     await submit(command(walletId));
-    const target = { transactionId: refund.transaction.id, walletId };
+    const target = await claimTarget(refund.transaction.id, walletId);
 
     const results = await Promise.all([
       t.app.get(ResolvePendingReferenceUseCase).execute(target),
@@ -456,6 +468,82 @@ describe('ResolvePendingReferenceUseCase', () => {
         (e) => e.event_type === 'WagerTransactionProcessed',
       ),
     ).toHaveLength(1);
+  });
+
+  test('an expired claim is skipped even before another worker takes over', async () => {
+    const walletId = await createWallet();
+    const refund = await submit(refundOf(walletId, 'bet-1'));
+    const target = await claimTarget(refund.transaction.id, walletId);
+    await sql('UPDATE wager_transactions SET next_reference_attempt_at = NOW() WHERE id = ?', [
+      target.transactionId,
+    ]);
+    expect(await anotherInstance().execute(target)).toEqual({ outcome: 'skipped' });
+    expect((await rowOf(target.transactionId))?.reference_attempts).toBe(0);
+    const recovered = await claimTarget(target.transactionId, walletId);
+    expect(recovered.claimToken).not.toBe(target.claimToken);
+    expect((await anotherInstance().execute(recovered)).outcome).toBe('rescheduled');
+  });
+
+  test('a reference arrival invalidates the old claim and the next claim resolves once', async () => {
+    const walletId = await createWallet();
+    const refund = await submit(refundOf(walletId, 'bet-1'));
+    const target = await claimTarget(refund.transaction.id, walletId);
+    await submit(command(walletId));
+    expect(await anotherInstance().execute(target)).toEqual({ outcome: 'skipped' });
+    expect((await rowOf(target.transactionId))?.reference_attempts).toBe(0);
+    const recovered = await claimTarget(target.transactionId, walletId);
+    expect(recovered.claimToken).not.toBe(target.claimToken);
+    expect((await anotherInstance().execute(recovered)).outcome).toBe('resolved');
+    expect(await ledgerCountOf(target.transactionId)).toBe(1);
+    expect(await balanceOf(walletId)).toBe('100.00');
+  });
+
+  test('SKIP LOCKED cannot replace a claim while its decision transaction holds the row lock', async () => {
+    const walletId = await createWallet();
+    const refund = await submit(refundOf(walletId, 'bet-1'));
+    const target = await claimTarget(refund.transaction.id, walletId);
+    const repo = t.app.get<WagerTransactionRepository>(WAGER_TRANSACTION_REPOSITORY);
+    let acquired!: () => void;
+    let release!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      acquired = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const holding = t.app.get<TransactionRunner>(TRANSACTION_RUNNER).run(async () => {
+      await t.app.get<WalletRepository>(WALLET_REPOSITORY).lockById(walletId);
+      const tx = await repo.lockClaimedPendingReference(
+        target.transactionId,
+        target.claimToken,
+        new Date(),
+      );
+      acquired();
+      await gate;
+      return tx;
+    });
+    const afterLease = new Date(Date.now() + 60_000);
+    try {
+      await Promise.race([
+        ready,
+        holding.then(() => {
+          throw new Error('lock not acquired');
+        }),
+      ]);
+      expect(
+        await repo.claimDuePendingReferences({ now: afterLease, limit: 1, leaseMs: 30_000 }),
+      ).toEqual([]);
+    } finally {
+      release();
+      expect((await holding)?.id).toBe(target.transactionId);
+    }
+    const [reclaimed] = await repo.claimDuePendingReferences({
+      now: afterLease,
+      limit: 1,
+      leaseMs: 30_000,
+    });
+    expect(reclaimed?.id).toBe(target.transactionId);
+    expect(reclaimed?.claimToken).not.toBe(target.claimToken);
   });
 
   test('a reschedule writes no event and wakes nobody', async () => {
@@ -474,7 +562,7 @@ describe('ResolvePendingReferenceUseCase', () => {
 
     const result = await t.app
       .get(ResolvePendingReferenceUseCase)
-      .execute({ transactionId: refund.transaction.id, walletId });
+      .execute(await claimTarget(refund.transaction.id, walletId));
 
     expect(result.outcome).toBe('rescheduled');
     const row = await rowOf(refund.transaction.id);
@@ -493,7 +581,7 @@ describe('ResolvePendingReferenceUseCase', () => {
     const bet = await submit(command(walletId));
     const result = await t.app
       .get(ResolvePendingReferenceUseCase)
-      .execute({ transactionId: bet.transaction.id, walletId });
+      .execute({ transactionId: bet.transaction.id, walletId, claimToken: crypto.randomUUID() });
     expect(result).toEqual({ outcome: 'skipped' });
   });
 
@@ -504,7 +592,7 @@ describe('ResolvePendingReferenceUseCase', () => {
     await submit(command(walletId));
     await t.app
       .get(ResolvePendingReferenceUseCase)
-      .execute({ transactionId: refund.transaction.id, walletId });
+      .execute(await claimTarget(refund.transaction.id, walletId));
 
     const replay = await submit(cmd);
     expect(replay.idempotentReplay).toBe(true);

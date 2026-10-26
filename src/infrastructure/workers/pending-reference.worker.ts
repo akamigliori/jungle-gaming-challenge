@@ -107,6 +107,7 @@ export class PendingReferenceWorker implements OnApplicationBootstrap, BeforeApp
         const result = await this.resolvePending.execute({
           transactionId: item.id,
           walletId: item.walletId,
+          claimToken: item.claimToken,
         });
         if (result.outcome === 'skipped') continue;
         this.logger.info(
