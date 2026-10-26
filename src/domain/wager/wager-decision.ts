@@ -55,7 +55,9 @@ type ReferenceCheck =
  */
 export function decideWager(p: DecideWagerParams): WagerDecision {
   const { tx, wallet } = p;
-  if (tx.playerId !== wallet.playerId) return reject(p, 'PLAYER_MISMATCH');
+  if (tx.playerId !== wallet.playerId) {
+    return reject(p, 'PLAYER_MISMATCH', tx.money.currency === wallet.currency);
+  }
   // Saldo de outra moeda não é observável na moeda da transação: rejeita sem snapshot.
   if (tx.money.currency !== wallet.currency) return reject(p, 'CURRENCY_MISMATCH', false);
 

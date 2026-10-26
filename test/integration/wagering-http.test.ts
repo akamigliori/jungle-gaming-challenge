@@ -246,11 +246,12 @@ describe('POST /wagering/transactions', () => {
       expect(byExternalId.status).toBe(200);
       expect(byExternalId.body).toEqual(got.body);
 
-      const [stored] = await orm.em.getConnection().execute<
-        { balance_after: string | null; wallet_version_after: number | null }[]
-      >('SELECT balance_after, wallet_version_after FROM wager_transactions WHERE id = ?', [
-        first.body.transactionId,
-      ]);
+      const [stored] = await orm.em
+        .getConnection()
+        .execute<{ balance_after: string | null; wallet_version_after: number | null }[]>(
+          'SELECT balance_after, wallet_version_after FROM wager_transactions WHERE id = ?',
+          [first.body.transactionId],
+        );
       expect(stored).toEqual({
         balance_after: expectedBalance?.amount ?? null,
         wallet_version_after: expectedBalance === null ? null : 1,
@@ -262,15 +263,15 @@ describe('POST /wagering/transactions', () => {
         balance: { amount: '100.00', currency: 'BRL' },
         version: 1,
       });
-      const [counts] = await orm.em.getConnection().execute<
-        { entries: number; transactions: number; events: number }[]
-      >(
-        `SELECT
+      const [counts] = await orm.em
+        .getConnection()
+        .execute<{ entries: number; transactions: number; events: number }[]>(
+          `SELECT
            (SELECT COUNT(*)::INT FROM wallet_ledger_entries WHERE wallet_id = ?) AS entries,
            (SELECT COUNT(*)::INT FROM wager_transactions WHERE wallet_id = ?) AS transactions,
            (SELECT COUNT(*)::INT FROM outbox_messages WHERE aggregate_id = ?) AS events`,
-        [walletId, walletId, walletId],
-      );
+          [walletId, walletId, walletId],
+        );
       // Só o crédito de abertura, a transação OPENING e uma rejeição com o seu evento.
       expect(counts).toEqual({ entries: 1, transactions: 2, events: 3 });
     },
