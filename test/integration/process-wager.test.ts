@@ -450,9 +450,12 @@ describe('ProcessWagerTransactionUseCase — idempotency', () => {
         hidden = false;
         return real.add(tx);
       },
-      findByIdempotencyKey: (p, k) =>
-        hidden ? Promise.resolve(null) : real.findByIdempotencyKey(p, k),
-      findByExternalId: (p, e) => (hidden ? Promise.resolve(null) : real.findByExternalId(p, e)),
+      findByIdempotencyKey: (p, k) => real.findByIdempotencyKey(p, k),
+      findByExternalId: (p, e) => real.findByExternalId(p, e),
+      findByIdempotency: (p, k, e) =>
+        hidden
+          ? Promise.resolve({ byKey: null, byExternalId: null })
+          : real.findByIdempotency(p, k, e),
       isReversed: (id) => real.isReversed(id),
       findById: (id) => real.findById(id),
       update: (tx, at) => real.update(tx, at),
