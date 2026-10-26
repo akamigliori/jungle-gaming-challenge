@@ -10,10 +10,11 @@ export type WorkerLogger = Pick<PinoLogger, 'info' | 'warn' | 'error'>;
 
 /**
  * Loop do publisher da outbox, um por instância: roda um ciclo, espera `pollIntervalMs` e repete.
- * Lote cheio publicado → o próximo ciclo começa na hora (ainda há fila); ciclo com falhas espera o
- * intervalo, para não varrer a outbox em ritmo de banco enquanto o SQS está fora. Um ciclo com
- * erro é logado e o loop segue. Não guarda estado de mensagens em memória: a coordenação entre
- * instâncias é toda no banco.
+ * Publicou algo sem falha → o próximo ciclo começa na hora (ainda há fila), inclusive com lote
+ * incompleto — é o que destrava a cauda depois do tráfego, quando sobram poucas cabeças de wallets
+ * quentes. Ciclo ocioso (nada publicado) ou com falha espera o intervalo, para não varrer a outbox
+ * em ritmo de banco enquanto o SQS está fora. Um ciclo com erro é logado e o loop segue. Não guarda
+ * estado de mensagens em memória: a coordenação entre instâncias é toda no banco.
  *
  * Para em `beforeApplicationShutdown`, antes de o pool do Postgres e o cliente SQS serem fechados,
  * e espera o ciclo em andamento terminar (nada fica publicado sem ser marcado por causa do shutdown).
@@ -51,7 +52,7 @@ export class OutboxPublisherWorker implements OnApplicationBootstrap, BeforeAppl
   }
 
   private async cycle(): Promise<void> {
-    const { batchSize, pollIntervalMs } = this.config.outboxPublisher;
+    const { pollIntervalMs } = this.config.outboxPublisher;
     let delayMs = pollIntervalMs;
     try {
       const { published, failures } = await this.publishOutbox.runOnce();
@@ -59,8 +60,9 @@ export class OutboxPublisherWorker implements OnApplicationBootstrap, BeforeAppl
         // ids do evento e só o erro seguro, nunca o conteúdo
         this.logger.warn({ ...ids, err: safeError(error) }, 'outbox message failed to publish');
       }
-      // só lote cheio de sucessos volta na hora; com falhas (SQS fora) espera o intervalo
-      if (published >= batchSize) delayMs = 0;
+      // publicou algo e não falhou: ainda há fila, então o próximo ciclo começa na hora, mesmo
+      // com lote incompleto; nada publicado (ocioso) ou falha (SQS fora) espera o intervalo
+      if (published > 0 && failures.length === 0) delayMs = 0;
     } catch (error) {
       // só o erro (banco/SQS), nunca o conteúdo dos eventos
       this.logger.error({ err: safeError(error) }, 'outbox publish cycle failed');
