@@ -10,7 +10,7 @@ este README é o mapa e o guia de uso.
 
 ## Destaques
 
-- **Correção provada, não prometida.** 295 testes unitários, 184 de integração, 6 de concorrência e
+- **Correção provada, não prometida.** 330 testes unitários, 217 de integração, 6 de concorrência e
   1 com **três processos reais** (`SIGKILL`, `SIGTERM` e reinício), todos com PostgreSQL e SQS
   reais, sem mocks de banco ou fila.
 - **O banco é a última linha de defesa.** Saldo não negativo, ledger append-only (trigger),
@@ -22,15 +22,21 @@ este README é o mapa e o guia de uso.
   só depois do `COMMIT`; retry com backoff, DLQ explícita e ordem preservada por wallet.
 - **Reconciliação.** `POST /wallets/:walletId/reconciliation` confere o saldo gravado contra o
   ledger, e o teste de carga termina reconciliando todas as wallets criadas.
-- **Teste de carga honesto.** `bun run test:load` contra as três instâncias: cerca de 290 req/s
-  em uma máquina de desenvolvimento, sem erro 5xx, 200 de 200 wallets consistentes, com o gargalo
-  (o publisher da outbox) nomeado e medido ([ARCHITECTURE.md, seção 16](ARCHITECTURE.md)).
+- **Auditoria de recusas.** Submissões que não viram resultado de negócio (payload inválido,
+  conflito de idempotência, wallet inexistente, moeda/jogador divergentes) ficam numa trilha
+  imutável e consultável por provedor (`GET /providers/:providerId/.../failures`), **fora** da chave
+  de idempotência: o provedor corrige e reenvia com a mesma chave.
+- **Teste de carga honesto.** `bun run test:load` contra as três instâncias: cerca de 260–290 req/s
+  em uma máquina de desenvolvimento, sem erro 5xx, 200 de 200 wallets consistentes; a cauda da
+  outbox foi medida e caiu para ~5 s ([ARCHITECTURE.md, seção 16](ARCHITECTURE.md)). O custo do SQS
+  emulado é medido isoladamente por `bun run bench:sqs`.
 - **Autenticação OIDC opcional.** O `AuthGuard` valida um bearer token do Keycloak (JWKS,
   `iss`/`aud`/`exp`), exige escopos (`wagers:submit`, `wagers:read`, `wallets:manage`) e confere o
   `providerId` do token contra o corpo; fica desligada por padrão (`AUTH_ENABLED=false`) para a
   demonstração — ver [ARCHITECTURE.md, seção 14](ARCHITECTURE.md).
-- **Simples de propósito.** Sem gateway, painéis ou tracing distribuído: o que ficou de fora e por
-  quê está em [ARCHITECTURE.md, seção 17](ARCHITECTURE.md).
+- **Simples de propósito.** Sem gateway nem tracing distribuído; o dashboard (Prometheus/Grafana) é
+  opcional, no profile `observability`. O que ficou de fora e por quê está em
+  [ARCHITECTURE.md, seção 17](ARCHITECTURE.md).
 
 ## Início rápido
 
@@ -445,18 +451,19 @@ vê-los, defina `TEST_LOG_LEVEL` (ex.: `TEST_LOG_LEVEL=info bun run test:integra
 
 ## Endpoints
 
-| Método e rota                                                             | Descrição                                                                                                                                                                                                                                                                                                           |
-| ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `POST /wallets`                                                           | cria uma wallet: `{ "playerId": "<uuid>", "initialBalance": { "amount": "1000.00", "currency": "BRL" } }` → `201`                                                                                                                                                                                                   |
-| `GET /wallets/:walletId`                                                  | consulta a wallet → `200 { id, playerId, balance, version }`                                                                                                                                                                                                                                                        |
-| `GET /wallets/:walletId/ledger?cursor=&limit=`                            | ledger em ordem de versão, paginado (`limit` de 1 a 200, padrão 50) → `200 { items, nextCursor }`                                                                                                                                                                                                                   |
-| `POST /wallets/:walletId/reconciliation`                                  | confere o saldo gravado contra o ledger → `200` sempre que a wallet existe (divergência vem no corpo: `consistent: false` e `issues`), `404 WALLET_NOT_FOUND`. Só lê: nunca corrige nada                                                                                                                            |
-| `POST /wagering/transactions`                                             | submete `BET`, `WIN`, `LOSS`, `REFUND` ou `ROLLBACK` (header `Idempotency-Key` obrigatório) → `201` processada, `202` aguardando a referência, `422` rejeitada por regra de negócio (ex.: `INSUFFICIENT_FUNDS`, `REVERSAL_INSUFFICIENT_FUNDS`, `BALANCE_LIMIT_EXCEEDED`), `409` chave reutilizada com outro payload |
-| `GET /wagering/transactions/:transactionId`                               | consulta uma transação pelo id interno → `200`, `404 NOT_FOUND`                                                                                                                                                                                                                                                     |
-| `GET /providers/:providerId/wagering/transactions/:externalTransactionId` | consulta uma transação pelo id do provedor → `200`, `404 NOT_FOUND`                                                                                                                                                                                                                                                 |
-| `GET /health/live`                                                        | processo vivo                                                                                                                                                                                                                                                                                                       |
-| `GET /health/ready`                                                       | Postgres e filas SQS alcançáveis (`503` se alguma dependência cair)                                                                                                                                                                                                                                                 |
-| `GET /metrics`                                                            | métricas Prometheus desta instância (texto), sem autenticação; o Prometheus coleta cada instância e agrega                                                                                                                                                                                                          |
+| Método e rota                                                                      | Descrição                                                                                                                                                                                                                                                                                                           |
+| ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /wallets`                                                                    | cria uma wallet: `{ "playerId": "<uuid>", "initialBalance": { "amount": "1000.00", "currency": "BRL" } }` → `201`                                                                                                                                                                                                   |
+| `GET /wallets/:walletId`                                                           | consulta a wallet → `200 { id, playerId, balance, version }`                                                                                                                                                                                                                                                        |
+| `GET /wallets/:walletId/ledger?cursor=&limit=`                                     | ledger em ordem de versão, paginado (`limit` de 1 a 200, padrão 50) → `200 { items, nextCursor }`                                                                                                                                                                                                                   |
+| `POST /wallets/:walletId/reconciliation`                                           | confere o saldo gravado contra o ledger → `200` sempre que a wallet existe (divergência vem no corpo: `consistent: false` e `issues`), `404 WALLET_NOT_FOUND`. Só lê: nunca corrige nada                                                                                                                            |
+| `POST /wagering/transactions`                                                      | submete `BET`, `WIN`, `LOSS`, `REFUND` ou `ROLLBACK` (header `Idempotency-Key` obrigatório) → `201` processada, `202` aguardando a referência, `422` rejeitada por regra de negócio (ex.: `INSUFFICIENT_FUNDS`, `REVERSAL_INSUFFICIENT_FUNDS`, `BALANCE_LIMIT_EXCEEDED`), `409` chave reutilizada com outro payload |
+| `GET /wagering/transactions/:transactionId`                                        | consulta uma transação pelo id interno → `200`, `404 NOT_FOUND`                                                                                                                                                                                                                                                     |
+| `GET /providers/:providerId/wagering/transactions/:externalTransactionId`          | consulta uma transação pelo id do provedor → `200`, `404 NOT_FOUND`                                                                                                                                                                                                                                                 |
+| `GET /providers/:providerId/wagering/transactions/:externalTransactionId/failures` | recusas auditadas dessa transação (motivo, categoria, se é `retryable`, canal, `correlationId`), mais recentes primeiro → `200 { failures }`                                                                                                                                                                        |
+| `GET /health/live`                                                                 | processo vivo                                                                                                                                                                                                                                                                                                       |
+| `GET /health/ready`                                                                | Postgres e filas SQS alcançáveis (`503` se alguma dependência cair)                                                                                                                                                                                                                                                 |
+| `GET /metrics`                                                                     | métricas Prometheus desta instância (texto), sem autenticação; o Prometheus coleta cada instância e agrega                                                                                                                                                                                                          |
 
 Exemplo:
 
