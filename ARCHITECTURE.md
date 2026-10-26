@@ -425,7 +425,8 @@ ele fica gravado mesmo que o processo morra no instante seguinte. Nada é enviad
 da transação: o envio só acontece depois, a partir do que já está confirmado no banco.
 
 **Publisher.** Cada instância roda um loop (`OutboxPublisherWorker`) que chama
-`PublishOutboxUseCase.runOnce()` a cada `OUTBOX_POLL_INTERVAL_MS` (250 ms). Um ciclo:
+`PublishOutboxUseCase.runOnce()`; quando o ciclo publica algo sem falha, o próximo começa na hora,
+senão espera `OUTBOX_POLL_INTERVAL_MS` (250 ms). Um ciclo:
 1. **Reserva** (transação curta e própria):
    `SELECT ... FROM outbox_messages o WHERE published_at IS NULL AND next_attempt_at <= $agora
    AND NOT EXISTS (versão menor da mesma wallet ainda não publicada) ORDER BY next_attempt_at, id
@@ -449,10 +450,13 @@ da transação: o envio só acontece depois, a partir do que já está confirmad
    (`next_attempt_at <= fim do lease reservado`): se o lease venceu e outra instância reservou a
    linha de novo, uma falha atrasada não sobrescreve o lease nem o `attempts` dela.
 
-Lote cheio publicado → o próximo ciclo começa na hora (ainda há fila); ciclo com falhas espera o
-intervalo normal, para não varrer a outbox sem pausa enquanto o SQS está fora. Erro no ciclo (banco fora, por
-exemplo) é logado, sem o conteúdo dos eventos, e o loop continua. No shutdown, o worker para antes
-de o pool do Postgres e o cliente SQS serem fechados e espera o ciclo em andamento terminar.
+Publicou algo sem falha → o próximo ciclo começa na hora (ainda há fila), **inclusive com lote
+incompleto** — é o que destrava a cauda depois do tráfego, quando sobram poucas cabeças de wallets
+quentes e o claim devolve menos que o lote. Ciclo ocioso (nada publicado) ou com falha espera o
+intervalo normal, para não varrer a outbox sem pausa enquanto o SQS está fora. Erro no ciclo (banco
+fora, por exemplo) é logado, sem o conteúdo dos eventos, e o loop continua. No shutdown, o worker
+para antes de o pool do Postgres e o cliente SQS serem fechados e espera o ciclo em andamento
+terminar.
 
 **Por que `SKIP LOCKED` + lease, sem coluna nova.** `SKIP LOCKED` faz duas instâncias reservando
 ao mesmo tempo pegarem linhas diferentes, sem uma esperar a outra. Empurrar o `next_attempt_at`
@@ -912,19 +916,25 @@ outbox_messages WHERE published_at IS NULL`, uma amostra por segundo): o pico re
 pendentes — coerente com o gauge — e a drenagem foi de 115 s, mostrando a variação do tempo de
 cauda (88 s, 89 s e 115 s nas três execuções).
 
+Depois do ajuste do loop (seção 11: quando o ciclo publica algo sem falha, o próximo começa na
+hora), uma execução de 60 s deu 223 req/s, pico de **1.484** pendentes e a outbox esvaziou em
+**4,99 s** — contra 88–115 s antes do ajuste, com 200/200 wallets reconciliadas e zero erros. A
+vazão HTTP variou para baixo nesta execução por carga da máquina; o ajuste só mexe no intervalo
+entre ciclos do publisher e não altera o caminho HTTP.
+
 **Análise.**
 - **O publisher deixou de acumular backlog.** Com o envio em lotes (`SendMessageBatch`) e os
-  pedaços em paralelo (`OUTBOX_PUBLISH_CONCURRENCY`), o backlog fica em ~2.700 durante o tráfego,
-  contra os ~20.700 de uma medição anterior em que o publisher mandava um `SendMessage` por evento:
-  cerca de 7× menos. Nessa vazão o publisher acompanha a produção (cerca de 450 eventos/s) e não
-  perde nada (a corretude passou).
-- **O que resta é a ordem estrita por wallet.** O claim só libera a cabeça (menor `wallet_version`
-  não publicada) de cada wallet, então uma wallet quente avança uma versão por ciclo. Durante o
-  tráfego isso é mascarado por haver muitas cabeças de wallets diferentes para publicar; depois que
-  o tráfego para, o que sobra está concentrado nas cadeias das 5 wallets quentes, e a cauda drena a
-  algumas dezenas de eventos/s (medido ~30–40/s, aproximadamente linear). É o custo consciente da
-  garantia de ordem (seção 11); quem precisa de saldo usa o `walletVersion` do payload como
-  referência.
+  pedaços em paralelo (`OUTBOX_PUBLISH_CONCURRENCY`), o backlog fica na casa de 1.500–2.700 durante
+  o tráfego, contra os ~20.700 de uma medição anterior em que o publisher mandava um `SendMessage`
+  por evento: cerca de 7× menos. Nessa vazão o publisher acompanha a produção (cerca de 450
+  eventos/s) e não perde nada (a corretude passou).
+- **A ordem estrita por wallet ainda limita a vazão por wallet, mas a cauda deixou de ser lenta.** O
+  claim só libera a cabeça (menor `wallet_version` não publicada) de cada wallet, então uma wallet
+  quente avança uma versão por ciclo de claim. Antes, o loop esperava 250 ms entre ciclos quando o
+  lote vinha incompleto, e depois do tráfego (poucas cabeças restantes) isso dominava a cauda
+  (88–115 s). Agora o ciclo encadeia na hora enquanto publica algo, e o que sobra drena em ~5 s; o
+  limite de uma versão por wallet continua sendo o custo consciente da garantia de ordem (seção 11),
+  mas não se traduz mais em espera artificial entre ciclos.
 - **Vazão e latência do caminho HTTP ficaram estáveis.** ~266 req/s e p50 ~90 ms, sem erros, dentro
   da variação desta máquina (gerador e sistema disputam CPU). A medição não permite atribuir ganho
   nem perda ao caminho HTTP.
@@ -1106,11 +1116,10 @@ diz o que custaria e como entraria.
 ## 19. Próximos passos
 
 **Performance (na ordem do gargalo atual):**
-- **A cauda da outbox para wallets quentes.** O backlog agregado caiu, mas depois do tráfego o que
-  sobra está concentrado nas cadeias das wallets quentes e drena uma versão por ciclo de claim
-  (seção 16). Candidatos: permitir um prefixo contíguo de versões por wallet no claim (mantendo a
-  ordem), ou aumentar a vazão de ciclos quando o lote vier incompleto; qualquer um precisa provar
-  que a ordem estrita continua garantida no banco.
+- **A cauda da outbox para wallets quentes.** O loop já não espera o intervalo quando publicou algo
+  (seção 11), o que acelera a cauda; o que resta é a vazão por wallet quente, limitada a uma versão
+  por ciclo de claim (seção 16). Candidato: permitir um prefixo contíguo de versões por wallet no
+  claim, mantendo a ordem estrita e provando isso no banco.
 - **Medir o custo do SQS emulado (LocalStack) isoladamente**, para separar quanto da latência de
   publicação é do serviço emulado e quanto é do banco/aplicação.
 - **Restam poucos round-trips no caminho HTTP** (cerca de uma dezena de instruções por transação).
