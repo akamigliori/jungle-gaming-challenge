@@ -807,6 +807,12 @@ Com `AUTH_ENABLED=true`, as três `OIDC_*` são obrigatórias e validadas no boo
   única consulta curta (índice parcial dos não publicados) e prazo de 1 s; se o banco não responde
   a tempo, valem `NaN` e a coleta continua; uma consulta lenta é reaproveitada pelas coletas seguintes (uma por vez por instância) e o `statement_timeout` local de 1 s a cancela no servidor. Todas as instâncias enxergam a mesma outbox, então o
   valor é o mesmo em cada uma (agregar com `max`, não `sum`).
+- **Alertas e dashboard (opcional):** o profile `observability` do Compose sobe o Prometheus (coleta
+  o `/metrics` das três instâncias e avalia as regras) e o Grafana (dashboard provisionado em
+  `docker/observability/`). As regras alertam para instância fora do ar (`up == 0`), lag da outbox
+  acima de 60 s, backlog acima de 5.000, mensagens novas na DLQ e muitos conflitos de lock (mais de
+  10 em 5 min). Sem Alertmanager: o disparo é visível no Prometheus e no Grafana. Os gauges da
+  outbox podem vir `NaN`; comparação com `NaN` não dispara alerta (desconhecido não é falha).
 - **Reconciliação** (`POST /wallets/:walletId/reconciliation`): confere o saldo gravado de uma
   wallet contra o ledger. Responde `200` sempre que a wallet existe, com a divergência sinalizada
   no corpo (`consistent: false`, `issues`), e `404 WALLET_NOT_FOUND` se não existe. Exemplo:
@@ -1007,6 +1013,7 @@ aparece). Formato: decisão, alternativas consideradas e motivo.
 | Nomes das filas configuráveis por variável de ambiente                                                                         | nomes fixos                                                          | cada suíte de teste usa filas próprias, sem interferir nas outras nem no ambiente local                         |
 | Banco de testes separado (`wagering_test`) no mesmo container                                                                  | um container por ambiente                                            | isolamento sem custo extra de memória; só é criado na primeira subida do volume                                 |
 | Keycloak num profile `auth` do Compose e as instâncias da aplicação num profile `app`                                          | tudo sempre ativo                                                    | economizar memória; os testes reutilizam Postgres e LocalStack já no ar                                         |
+| Prometheus + Grafana num profile `observability` do Compose, com `mem_limit` e retenção curta                                  | stack de observabilidade sempre ativa ou hospedada                   | alertas e dashboard sem pesar na máquina de 8 GB; sobem só quando alguém quer olhar os painéis                  |
 | Testes de integração usam `TEST_LOG_LEVEL` (padrão `silent`)                                                                   | herdar o `LOG_LEVEL` do `.env`                                       | quem copia `.env.example` não vê os testes cheios de log                                                        |
 
 ### Testes
@@ -1029,7 +1036,7 @@ diz o que custaria e como entraria.
 | Item                                        | Por que ficou de fora                                                                                                                                                                  | Como entraria                                                                             |
 | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
 | Gateway na borda (limite de taxa, timeouts) | infraestrutura de implantação, fora do que o serviço garante; `lock_timeout` e `statement_timeout` já limitam quanto tempo uma requisição segura o banco                               | proxy reverso na frente das instâncias, com limite por IP e `/metrics` só na rede interna |
-| Tracing distribuído e painéis               | o serviço expõe logs com ids, métricas Prometheus e health; tracing e painéis pesam numa máquina de 8 GB e não mudam a correção                                                        | coletor OTLP e um dashboard sobre as métricas já expostas (seção 19)                      |
+| Tracing distribuído                         | o serviço expõe logs com ids, métricas Prometheus, alertas e dashboard; tracing pesa e não muda a correção                                                                             | coletor OTLP e instrumentação dos casos de uso                                            |
 | Auditoria de submissões inválidas           | decisão da seção 4: o que falha antes de existir uma transação válida devolve o erro e fica em log e métrica (no SQS, vai para a DLQ com o código); só a rejeição de negócio é gravada | tabela própria de recusas, com retenção, fora da tabela de transações                     |
 | Lote por wallet no consumer                 | otimização de vazão; o gargalo medido no teste de carga é o publisher da outbox, não o consumer                                                                                        | seção 19                                                                                  |
 
@@ -1110,8 +1117,6 @@ diz o que custaria e como entraria.
   explica o porquê); outras oportunidades, se o teste de carga as apontar.
 
 **Observabilidade e segurança:**
-- **Alertas** sobre as métricas já expostas (outbox lag crescendo, `wagering_dlq_messages_total`
-  subindo, conflitos de lock) e um dashboard: hoje só há o endpoint de coleta.
 - **Usuário de banco só com DML** para a aplicação (`SELECT`, `INSERT`, `UPDATE`), sem `TRUNCATE`
   nem DDL; as migrations rodam com outro usuário.
 
