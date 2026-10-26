@@ -161,6 +161,9 @@ chega ao banco: `Money.add` lança erro de domínio e, num crédito, a transaç�
   `journal_matches_wallet` (BEFORE INSERT) confere direção oposta + mesmo valor + mesma moeda, e o
   constraint trigger deferido `wallet_requires_journal` exige a contrapartida no `COMMIT`. A casa
   não tem saldo materializado (evita linha quente global): o saldo dela é `SUM` sob demanda.
+  A migration `journal_history_backfill` preenche contrapartidas históricas ausentes com valor,
+  moeda e data do ledger, sem modificar entradas existentes. Ela bloqueia escritas no journal
+  durante a execução; seu `down` preserva as contrapartidas e a reaplicação não as duplica.
 - **`POST /wallets`**: numa única transação, insere a wallet e, se o saldo inicial for positivo, a
   transação interna `OPENING` já `PROCESSED`, o lançamento `CREDIT` (versão 1) e os eventos
   `WagerTransactionProcessed` e `WalletBalanceChanged` na outbox. Saldo zero grava só a wallet

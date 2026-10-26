@@ -4,6 +4,7 @@ import type {
   WalletLedgerReader,
   WalletLedgerSnapshot,
 } from '../../../application/ports/wallet-ledger-reader';
+import { OPENING_PROVIDER_ID } from '../../../domain/wager/wager-transaction';
 
 interface SnapshotRow {
   wallet_id: string;
@@ -25,8 +26,9 @@ interface SnapshotRow {
 /**
  * Todas as somas e comparações de dinheiro acontecem aqui, em `NUMERIC`, e saem como texto. A
  * cadeia do ledger usa `LAG`: cada lançamento deve partir do `balance_after` do anterior (o
- * primeiro parte de zero) e ter a versão do anterior + 1. A contrapartida da casa (partida
- * dobrada) é conferida com um `LEFT JOIN` no journal.
+ * primeiro parte de zero) e ter a versão do anterior + 1. A versão inicial é 1 com crédito de
+ * abertura ou 2 quando a wallet abriu zerada. A contrapartida da casa (partida dobrada) é
+ * conferida com um `LEFT JOIN` no journal.
  */
 const SNAPSHOT_SQL = `
   WITH entries AS (
@@ -48,6 +50,7 @@ const SNAPSHOT_SQL = `
     SELECT
       COUNT(*)::INT AS entries,
       COALESCE(SUM(CASE WHEN direction = 'CREDIT' THEN amount ELSE -amount END), 0)::NUMERIC(20,2) AS calculated,
+      MIN(wallet_version) AS first_version,
       MAX(wallet_version) AS ledger_version,
       MAX(balance_after) FILTER (WHERE reverse_position = 1) AS last_balance_after,
       COUNT(*) FILTER (WHERE balance_before <> COALESCE(previous_after, 0))::INT AS broken_links,
@@ -68,7 +71,14 @@ const SNAPSHOT_SQL = `
     t.ledger_version,
     t.entries,
     t.broken_links,
-    t.version_gaps,
+    t.version_gaps + CASE
+      WHEN t.entries > 0 AND t.first_version <> CASE WHEN EXISTS (
+        SELECT 1 FROM wager_transactions opening
+        WHERE opening.provider_id = ? AND opening.external_transaction_id = w.id::TEXT
+          AND opening.wallet_id = w.id AND opening.kind = 'OPENING'
+      ) THEN 1 ELSE 2 END THEN 1
+      ELSE 0
+    END AS version_gaps,
     t.journal_gaps
   FROM wallets w
   CROSS JOIN totals t
@@ -86,7 +96,7 @@ export class WalletLedgerQuery implements WalletLedgerReader {
   async read(walletId: string): Promise<WalletLedgerSnapshot | null> {
     const [row] = await this.em
       .getConnection()
-      .execute<SnapshotRow[]>(SNAPSHOT_SQL, [walletId, walletId], 'all');
+      .execute<SnapshotRow[]>(SNAPSHOT_SQL, [walletId, OPENING_PROVIDER_ID, walletId], 'all');
     return row ? toSnapshot(row) : null;
   }
 }

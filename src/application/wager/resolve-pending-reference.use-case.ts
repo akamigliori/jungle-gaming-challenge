@@ -2,7 +2,6 @@ import { InvariantViolationError } from '../../domain/shared/domain-error';
 import type { ReferenceRetryPolicy } from '../../domain/wager/reference-retry';
 import { reevaluatePendingWager } from '../../domain/wager/wager-decision';
 import type { WagerTransaction } from '../../domain/wager/wager-transaction';
-import { WagerTransactionStatus } from '../../domain/wager/wager-transaction-status';
 import type { Clock } from '../ports/clock';
 import type { IdGenerator } from '../ports/id-generator';
 import type { JournalRepository } from '../ports/journal.repository';
@@ -35,12 +34,13 @@ export interface ResolvePendingReferenceDeps {
 export interface ResolvePendingReferenceParams {
   transactionId: string;
   walletId: string;
+  claimToken: string;
 }
 
 /**
  * `resolved`: chegou a `PROCESSED`; `rejected`: chegou a `REJECTED`; `rescheduled`: continua
- * pendente, com nova tentativa agendada; `skipped`: já não estava pendente (outra instância
- * resolveu antes). Fora o `skipped`, traz o provedor e `attempts`: o contador de tentativas da
+ * pendente, com nova tentativa agendada; `skipped`: o claim venceu, foi substituído ou a
+ * transação já não está pendente. Fora o `skipped`, traz o provedor e `attempts`: o contador de tentativas da
  * transação depois desta avaliação (`reference_attempts`), qualquer que seja o resultado.
  */
 export type ResolvePendingReferenceResult =
@@ -72,8 +72,8 @@ const PENDING_OUTCOMES = {
  * transação, ledger e eventos como o processamento normal; ainda pendente, só reagenda (sem
  * evento); esgotadas as tentativas, rejeita.
  *
- * Duas instâncias sobre a mesma pendência são serializadas pelo lock da wallet, e a segunda, ao
- * recarregar a transação já resolvida, sai sem efeito.
+ * Depois do lock da wallet, trava o claim atual: um worker com reserva vencida ou substituída
+ * sai sem efeito, mesmo se a transação continuar pendente. O lock impede outro claim até o commit.
  */
 export class ResolvePendingReferenceUseCase {
   constructor(private readonly deps: ResolvePendingReferenceDeps) {}
@@ -119,10 +119,10 @@ export class ResolvePendingReferenceUseCase {
       const wallet = await wallets.lockById(p.walletId);
       if (!wallet) throw new InvariantViolationError(`wallet ${p.walletId} of a pending not found`);
 
-      // 2. recarrega sob o lock: se outra instância já decidiu, não há o que fazer
-      const tx = await transactions.findById(p.transactionId);
-      if (!tx || tx.status !== WagerTransactionStatus.PendingReference)
-        return { result: { outcome: 'skipped' }, tx: null };
+      // 2. confirma a posse e trava a pendência; o claim não pode mudar durante a decisão
+      const at = clock.now();
+      const tx = await transactions.lockClaimedPendingReference(p.transactionId, p.claimToken, at);
+      if (!tx) return { result: { outcome: 'skipped' }, tx: null };
       if (tx.walletId !== wallet.id) {
         throw new InvariantViolationError('pending transaction belongs to another wallet');
       }
@@ -130,7 +130,6 @@ export class ResolvePendingReferenceUseCase {
       // 3. mesmas regras do processamento, mais o limite de tentativas
       const reference = await findReference(transactions, tx);
       const expectedVersion = wallet.version;
-      const at = clock.now();
       const decision = reevaluatePendingWager({
         tx,
         wallet,

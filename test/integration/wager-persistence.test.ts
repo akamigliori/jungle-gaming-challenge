@@ -510,8 +510,8 @@ describe('WagerTransactionRepository pending references', () => {
     });
 
     expect(claimed).toEqual([
-      { id: first.id, walletId: wallet.id },
-      { id: second.id, walletId: wallet.id },
+      { id: first.id, walletId: wallet.id, claimToken: expect.any(String) },
+      { id: second.id, walletId: wallet.id, claimToken: expect.any(String) },
     ]);
     expect((await nextAttemptOf(first.id)).getTime()).toBe(now.getTime() + 30_000);
     expect(
