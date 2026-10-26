@@ -75,20 +75,47 @@ describe('OutboxPublisherWorker', () => {
     expect(errors.length).toBe(fake.calls());
   });
 
-  test('full batch published -> next cycle right away instead of waiting the poll interval', async () => {
+  test('partial batch published -> next cycle right away (drains the tail)', async () => {
     let remaining = 5;
     const fake = fakeUseCase(async () => {
       if (remaining === 0) return { published: 0, failed: 0, failures: [] };
       remaining -= 1;
-      return { published: 2, failed: 0, failures: [] };
+      // batchSize é 2, então 1 é lote incompleto: mesmo assim o próximo ciclo não espera
+      return { published: 1, failed: 0, failures: [] };
     });
     const worker = new OutboxPublisherWorker(fake.useCase, config(LONG_POLL), logger().log);
     worker.onApplicationBootstrap();
-    // 5 lotes cheios seguidos + 1 vazio; depois disso só depois do intervalo longo
+    // 5 lotes parciais seguidos + 1 vazio; depois disso só depois do intervalo longo
     await waitFor(() => fake.calls() >= 6);
     await sleep(30);
     await worker.beforeApplicationShutdown();
     expect(fake.calls()).toBe(6);
+  });
+
+  test('partial success with failures -> waits the poll interval (no tight loop while SQS is flaky)', async () => {
+    let calls = 0;
+    const fake = fakeUseCase(async () => {
+      calls += 1;
+      return {
+        published: 1,
+        failed: 1,
+        failures: [
+          {
+            eventId: 'e1',
+            eventType: 'WalletBalanceChanged',
+            aggregateId: 'w1',
+            attempts: 1,
+            error: new Error('sqs flaky'),
+          },
+        ],
+      };
+    });
+    const worker = new OutboxPublisherWorker(fake.useCase, config(LONG_POLL), logger().log);
+    worker.onApplicationBootstrap();
+    await waitFor(() => calls >= 1);
+    await sleep(40);
+    await worker.beforeApplicationShutdown();
+    expect(calls).toBe(1);
   });
 
   test('full batch of failures -> waits the poll interval (no tight loop while SQS is down)', async () => {
