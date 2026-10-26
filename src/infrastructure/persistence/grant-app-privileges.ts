@@ -17,6 +17,7 @@ const APP_TABLES = [
   'journal_entries',
   'inbox_messages',
   'outbox_messages',
+  'wager_submission_failures',
 ] as const;
 
 /** Tabela da app onde o worker de retenção apaga eventos publicados. */

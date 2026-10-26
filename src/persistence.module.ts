@@ -3,6 +3,7 @@ import { INBOX_REPOSITORY } from './application/ports/inbox.repository';
 import { JOURNAL_REPOSITORY } from './application/ports/journal.repository';
 import { LEDGER_REPOSITORY } from './application/ports/ledger.repository';
 import { OUTBOX_REPOSITORY } from './application/ports/outbox.repository';
+import { SUBMISSION_FAILURE_REPOSITORY } from './application/ports/submission-failure.repository';
 import { TRANSACTION_RUNNER } from './application/ports/transaction-runner';
 import { WAGER_TRANSACTION_REPOSITORY } from './application/ports/wager-transaction.repository';
 import { WALLET_REPOSITORY } from './application/ports/wallet.repository';
@@ -11,6 +12,7 @@ import { MikroOrmInboxRepository } from './infrastructure/persistence/repositori
 import { MikroOrmJournalRepository } from './infrastructure/persistence/repositories/mikro-orm-journal.repository';
 import { MikroOrmLedgerRepository } from './infrastructure/persistence/repositories/mikro-orm-ledger.repository';
 import { MikroOrmOutboxRepository } from './infrastructure/persistence/repositories/mikro-orm-outbox.repository';
+import { MikroOrmSubmissionFailureRepository } from './infrastructure/persistence/repositories/mikro-orm-submission-failure.repository';
 import { MikroOrmWagerTransactionRepository } from './infrastructure/persistence/repositories/mikro-orm-wager-transaction.repository';
 import { MikroOrmWalletRepository } from './infrastructure/persistence/repositories/mikro-orm-wallet.repository';
 
@@ -22,6 +24,7 @@ const PERSISTENCE_PROVIDERS = [
   { provide: JOURNAL_REPOSITORY, useClass: MikroOrmJournalRepository },
   { provide: INBOX_REPOSITORY, useClass: MikroOrmInboxRepository },
   { provide: OUTBOX_REPOSITORY, useClass: MikroOrmOutboxRepository },
+  { provide: SUBMISSION_FAILURE_REPOSITORY, useClass: MikroOrmSubmissionFailureRepository },
 ];
 
 /**

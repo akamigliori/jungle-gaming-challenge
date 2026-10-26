@@ -21,6 +21,10 @@ import { RequireScope } from '../../../infrastructure/auth/require-scope.decorat
 import { SCOPE_WAGERS_READ, SCOPE_WAGERS_SUBMIT } from '../../../infrastructure/auth/scopes';
 import { wagerOutcomeFields } from '../../../infrastructure/logging/wager-log';
 import {
+  type SubmissionFailureDto,
+  SubmissionFailureQuery,
+} from '../../../infrastructure/persistence/queries/submission-failure.query';
+import {
   type WagerTransactionDto,
   WagerTransactionQuery,
 } from '../../../infrastructure/persistence/queries/wager-transaction.query';
@@ -57,6 +61,7 @@ export class WageringController {
   constructor(
     private readonly processWager: ProcessWagerTransactionUseCase,
     private readonly transactions: WagerTransactionQuery,
+    private readonly submissionFailures: SubmissionFailureQuery,
     @InjectPinoLogger(WageringController.name) private readonly logger: PinoLogger,
   ) {}
 
@@ -129,6 +134,25 @@ export class WageringController {
       throw new NotFoundException('transaction not found');
     }
     return found(await this.transactions.findByExternalId(providerId, externalTransactionId));
+  }
+
+  /** Recusas auditadas de uma transação (payload inválido, conflito, wallet inexistente...). */
+  @Get('providers/:providerId/wagering/transactions/:externalTransactionId/failures')
+  @RequireScope(SCOPE_WAGERS_READ)
+  async findFailures(
+    @Param() params: unknown,
+    @Req() req: RequestWithId,
+  ): Promise<{ failures: SubmissionFailureDto[] }> {
+    const { providerId, externalTransactionId } = providerTransactionParamsSchema.parse(params);
+    // outro provedor não enxerga as recusas: 404 sem revelar que existem
+    if (req.auth && req.auth.providerId !== providerId) {
+      throw new NotFoundException('transaction not found');
+    }
+    const failures = await this.submissionFailures.listByProviderAndExternalId(
+      providerId,
+      externalTransactionId,
+    );
+    return { failures };
   }
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "jungle-gaming-challenge",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -16,6 +16,7 @@
     "test:multi-instance": "bun test test/multi-instance --timeout 180000",
     "demo": "bun scripts/demo.ts",
     "test:load": "bun scripts/load.ts",
+    "bench:sqs": "bun scripts/sqs-bench.ts",
     "migration:up": "bun scripts/migrate.ts up",
     "migration:down": "bun scripts/migrate.ts down"
   },

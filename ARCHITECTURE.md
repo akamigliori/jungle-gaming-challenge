@@ -296,6 +296,7 @@ resolução no tempo do teste.
 | `POST /wagering/transactions` (header `Idempotency-Key` obrigatório, até 255 caracteres) | `201` `PROCESSED`, `202` `PENDING_REFERENCE`, `422` `REJECTED`, `409` conflito de idempotência, `400`/`404` como na seção 5, `503` + `Retry-After` em falha transitória |
 | `GET /wagering/transactions/:transactionId`                                              | `200` com a transação, `404 NOT_FOUND`                                                                                                                                  |
 | `GET /providers/:providerId/wagering/transactions/:externalTransactionId`                | `200` com a transação, `404 NOT_FOUND`                                                                                                                                  |
+| `GET /providers/:providerId/wagering/transactions/:externalTransactionId/failures`       | `200 { failures }`: recusas auditadas (motivo, categoria, `retryable`, canal, `correlationId`), mais recentes primeiro                                                  |
 
 Corpo do `POST`: `{ transactionId, status, balance, idempotentReplay }`; no `422` o corpo também
 traz `error: { code, message, retryable }`. `balance` é o saldo depois da transação (em
@@ -817,6 +818,13 @@ Com `AUTH_ENABLED=true`, as três `OIDC_*` são obrigatórias e validadas no boo
   acima de 60 s, backlog acima de 5.000, mensagens novas na DLQ e muitos conflitos de lock (mais de
   10 em 5 min). Sem Alertmanager: o disparo é visível no Prometheus e no Grafana. Os gauges da
   outbox podem vir `NaN`; comparação com `NaN` não dispara alerta (desconhecido não é falha).
+- **Auditoria de recusas.** Submissões que não viram resultado de negócio (payload/moeda inválidos,
+  conflito de idempotência, wallet inexistente, moeda/jogador divergentes) ficam em
+  `wager_submission_failures` (append-only, fora do estado financeiro e fora da chave de
+  idempotência) e são consultáveis em `GET /providers/:providerId/.../failures`. A gravação é
+  best-effort, numa transação própria, depois que a transação de negócio falha: se ela também
+  falhar, o erro original segue para o cliente. Rejeições de negócio (`REJECTED`) não entram na
+  auditoria — já são transações consultáveis. A retenção fica como próximo passo.
 - **Reconciliação** (`POST /wallets/:walletId/reconciliation`): confere o saldo gravado de uma
   wallet contra o ledger. Responde `200` sempre que a wallet existe, com a divergência sinalizada
   no corpo (`consistent: false`, `issues`), e `404 WALLET_NOT_FOUND` se não existe. Exemplo:
@@ -935,6 +943,10 @@ entre ciclos do publisher e não altera o caminho HTTP.
   (88–115 s). Agora o ciclo encadeia na hora enquanto publica algo, e o que sobra drena em ~5 s; o
   limite de uma versão por wallet continua sendo o custo consciente da garantia de ordem (seção 11),
   mas não se traduz mais em espera artificial entre ciclos.
+- **O SQS emulado não é o gargalo nesta escala.** Medido isoladamente (`bun run bench:sqs`, sem banco
+  nem aplicação), o LocalStack publica ~2.000–2.150 msg/s em lotes de 10 — cerca de 4× a vazão que o
+  publisher de fato atinge no teste de carga (~450–540 eventos/s) — e consome ~750 msg/s com um
+  consumidor. O teto está no claim/banco (uma versão por wallet por ciclo), não no envio.
 - **Vazão e latência do caminho HTTP ficaram estáveis.** ~266 req/s e p50 ~90 ms, sem erros, dentro
   da variação desta máquina (gerador e sistema disputam CPU). A medição não permite atribuir ganho
   nem perda ao caminho HTTP.
@@ -999,6 +1011,7 @@ aparece). Formato: decisão, alternativas consideradas e motivo.
 | Publicação da outbox com concorrência limitada (`OUTBOX_PUBLISH_CONCURRENCY`, padrão 5)              | sequencial; todo o lote em paralelo                                          | sobrepõe a latência do `SendMessageBatch` (o gargalo medido) sem disparar o lote inteiro de uma vez; a ordem por wallet vem do claim (cabeça por wallet), não desta concorrência                                                     |
 | Idempotência numa leitura só (`findByIdempotency` devolve `byKey` e `byExternalId`)                  | duas consultas separadas                                                     | um round-trip a menos por transação; a chave tem precedência (uma linha que casa com os dois sai só em `byKey`), preservando a semântica anterior                                                                                    |
 | `lock_timeout` da wallet continua com `SET LOCAL`, não no nível da conexão                           | `lock_timeout` como parâmetro de startup da conexão                          | no nível da conexão o timeout vazaria para DDL que espera locks legitimamente (`TRUNCATE` nos testes, migrations), e o ganho de um round-trip por transação não paga esse risco                                                      |
+| Auditoria de recusas em tabela própria, transação separada e best-effort                             | gravar a recusa na transação do processamento; só log/métrica                | a linha sobrevive ao rollback da tentativa, fica fora da chave de idempotência e nunca troca o erro do cliente; rejeições de negócio já são transações consultáveis                                                                  |
 
 ### Schema
 
@@ -1044,12 +1057,11 @@ Prioridade do projeto: correção financeira, concorrência, idempotência e men
 opção mais simples quando houver dúvida. Estes itens foram avaliados e deixados de fora; cada um
 diz o que custaria e como entraria.
 
-| Item                                        | Por que ficou de fora                                                                                                                                                                  | Como entraria                                                                             |
-| ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| Gateway na borda (limite de taxa, timeouts) | infraestrutura de implantação, fora do que o serviço garante; `lock_timeout` e `statement_timeout` já limitam quanto tempo uma requisição segura o banco                               | proxy reverso na frente das instâncias, com limite por IP e `/metrics` só na rede interna |
-| Tracing distribuído                         | o serviço expõe logs com ids, métricas Prometheus, alertas e dashboard; tracing pesa e não muda a correção                                                                             | coletor OTLP e instrumentação dos casos de uso                                            |
-| Auditoria de submissões inválidas           | decisão da seção 4: o que falha antes de existir uma transação válida devolve o erro e fica em log e métrica (no SQS, vai para a DLQ com o código); só a rejeição de negócio é gravada | tabela própria de recusas, com retenção, fora da tabela de transações                     |
-| Lote por wallet no consumer                 | otimização de vazão; o gargalo medido no teste de carga é o publisher da outbox, não o consumer                                                                                        | seção 19                                                                                  |
+| Item                                        | Por que ficou de fora                                                                                                                                    | Como entraria                                                                             |
+| ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| Gateway na borda (limite de taxa, timeouts) | infraestrutura de implantação, fora do que o serviço garante; `lock_timeout` e `statement_timeout` já limitam quanto tempo uma requisição segura o banco | proxy reverso na frente das instâncias, com limite por IP e `/metrics` só na rede interna |
+| Tracing distribuído                         | o serviço expõe logs com ids, métricas Prometheus, alertas e dashboard; tracing pesa e não muda a correção                                               | coletor OTLP e instrumentação dos casos de uso                                            |
+| Lote por wallet no consumer                 | otimização de vazão; o gargalo medido no teste de carga é o publisher da outbox, não o consumer                                                          | seção 19                                                                                  |
 
 ## 18. Limitações conhecidas
 
@@ -1120,8 +1132,6 @@ diz o que custaria e como entraria.
   (seção 11), o que acelera a cauda; o que resta é a vazão por wallet quente, limitada a uma versão
   por ciclo de claim (seção 16). Candidato: permitir um prefixo contíguo de versões por wallet no
   claim, mantendo a ordem estrita e provando isso no banco.
-- **Medir o custo do SQS emulado (LocalStack) isoladamente**, para separar quanto da latência de
-  publicação é do serviço emulado e quanto é do banco/aplicação.
 - **Restam poucos round-trips no caminho HTTP** (cerca de uma dezena de instruções por transação).
   Mover o `SET LOCAL lock_timeout` para o nível da conexão foi avaliado e rejeitado (a seção 17
   explica o porquê); outras oportunidades, se o teste de carga as apontar.
