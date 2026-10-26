@@ -70,6 +70,52 @@ const reconcile = (walletId: string) =>
 const sql = <T = Record<string, unknown>>(query: string, params: unknown[] = []) =>
   orm.em.getConnection().execute<T[]>(query, params);
 
+/** Insere uma sequência inicial inválida sem desligar os triggers do ledger ou do journal. */
+async function seedInvalidFirstVersion(kind: 'OPENING' | 'WIN', version: number): Promise<string> {
+  const walletId = await createWallet('0.00');
+  const transactionId = crypto.randomUUID();
+  const providerId = kind === 'OPENING' ? 'internal' : 'provider-a';
+  const externalId = kind === 'OPENING' ? walletId : 'seed-credit';
+  await orm.em.transactional(async (em) => {
+    await em.execute('UPDATE wallets SET balance = 100.00, version = ? WHERE id = ?', [
+      version,
+      walletId,
+    ]);
+    await em.execute(
+      `INSERT INTO wager_transactions
+         (id, provider_id, external_transaction_id, idempotency_key, payload_hash, wallet_id,
+          player_id, round_id, game_id, kind, amount, currency, status, balance_after,
+          wallet_version_after, processed_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, REPEAT('a', 64), ?, ?, 'round-1', 'game-1', ?, 100.00, 'BRL',
+               'PROCESSED', 100.00, ?, NOW(), NOW(), NOW())`,
+      [
+        transactionId,
+        providerId,
+        externalId,
+        `seed:${walletId}`,
+        walletId,
+        PLAYER_ID,
+        kind,
+        version,
+      ],
+    );
+    await em.execute(
+      `INSERT INTO wallet_ledger_entries
+         (id, wallet_id, transaction_id, direction, amount, currency, balance_before,
+          balance_after, wallet_version, created_at)
+       VALUES (?, ?, ?, 'CREDIT', 100.00, 'BRL', 0.00, 100.00, ?, NOW())`,
+      [crypto.randomUUID(), walletId, transactionId, version],
+    );
+    await em.execute(
+      `INSERT INTO journal_entries
+         (id, transaction_id, account_id, direction, amount, currency, created_at)
+       VALUES (?, ?, ?, 'DEBIT', 100.00, 'BRL', NOW())`,
+      [crypto.randomUUID(), transactionId, `house:${providerId}:BRL`],
+    );
+  });
+  return walletId;
+}
+
 beforeAll(async () => {
   orm = await withTestDb();
   logs = new LogCapture();
@@ -119,6 +165,72 @@ describe('POST /wallets/:walletId/reconciliation', () => {
     const body = (await (await reconcile(walletId)).json()) as Report;
     expect(body).toMatchObject({ consistent: true, checkedEntries: 0, version: 1 });
   });
+
+  test('a wallet opened with zero balance has a consistent first ledger version of 2', async () => {
+    const walletId = await createWallet('0.00');
+    await wager(walletId, 'WIN', 'win-1', '10.00');
+    await wager(walletId, 'BET', 'bet-1', '5.00');
+
+    const res = await reconcile(walletId);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Report;
+    expect(body).toMatchObject({
+      consistent: true,
+      issues: [],
+      storedBalance: { amount: '5.00', currency: 'BRL' },
+      calculatedBalance: { amount: '5.00', currency: 'BRL' },
+      checkedEntries: 2,
+      version: 3,
+      ledgerVersion: 3,
+    });
+    expect(
+      await sql(
+        'SELECT wallet_version FROM wallet_ledger_entries WHERE wallet_id = ? ORDER BY wallet_version',
+        [walletId],
+      ),
+    ).toEqual([{ wallet_version: 2 }, { wallet_version: 3 }]);
+  });
+
+  test.each([
+    [2, 'OPENING'],
+    [7, 'OPENING'],
+    [1, 'WIN'],
+    [7, 'WIN'],
+  ] as const)(
+    'first ledger version %i for %s is flagged without modifying the wallet or ledger',
+    async (version, kind) => {
+      const walletId = await seedInvalidFirstVersion(kind, version);
+      // A versão seguinte é contígua: só a versão inicial torna o histórico inválido.
+      await wager(walletId, 'WIN', 'next-credit', '10.00');
+      const entriesBefore = await sql(
+        'SELECT * FROM wallet_ledger_entries WHERE wallet_id = ? ORDER BY wallet_version',
+        [walletId],
+      );
+
+      const res = await reconcile(walletId);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Report;
+      expect(body).toMatchObject({
+        consistent: false,
+        issues: ['LEDGER_VERSION_GAP'],
+        storedBalance: { amount: '110.00', currency: 'BRL' },
+        calculatedBalance: { amount: '110.00', currency: 'BRL' },
+        difference: { amount: '0.00', currency: 'BRL' },
+        checkedEntries: 2,
+        version: version + 1,
+        ledgerVersion: version + 1,
+      });
+      expect(
+        await sql('SELECT balance::TEXT, version FROM wallets WHERE id = ?', [walletId]),
+      ).toEqual([{ balance: '110.00', version: version + 1 }]);
+      expect(
+        await sql(
+          'SELECT * FROM wallet_ledger_entries WHERE wallet_id = ? ORDER BY wallet_version',
+          [walletId],
+        ),
+      ).toEqual(entriesBefore);
+    },
+  );
 
   test('a diverging balance is flagged, logged without amounts, counted and never corrected', async () => {
     const walletId = await createWallet();
