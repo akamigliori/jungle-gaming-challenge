@@ -8,55 +8,93 @@ Stack: Bun 1.x, TypeScript (strict), NestJS, MikroORM, PostgreSQL 17, SQS (Local
 Decisões completas, taxonomia de erros e limitações estão no [`ARCHITECTURE.md`](ARCHITECTURE.md);
 este README é o mapa e o guia de uso.
 
+## Sumário
+
+- [Destaques](#destaques)
+- [Início rápido](#início-rápido)
+- [Visão geral](#visão-geral)
+- [Checklist do desafio](#checklist-do-desafio)
+- [Arquitetura](#arquitetura)
+  - [Camadas](#camadas)
+- [Como uma aposta é processada](#como-uma-aposta-é-processada)
+- [Garantias e como são impostas](#garantias-e-como-são-impostas)
+- [Mensageria](#mensageria)
+- [Várias instâncias](#várias-instâncias)
+- [Estrutura do código](#estrutura-do-código)
+- [Pré-requisitos](#pré-requisitos)
+- [Setup](#setup)
+- [Três instâncias com Docker](#três-instâncias-com-docker)
+  - [Autenticação (opcional)](#autenticação-opcional)
+  - [Observabilidade (opcional)](#observabilidade-opcional)
+- [Comandos](#comandos)
+- [Demonstração](#demonstração)
+- [Teste de carga](#teste-de-carga)
+- [Custo do SQS isolado](#custo-do-sqs-isolado)
+- [CI](#ci)
+- [Testes de integração](#testes-de-integração)
+- [Variáveis de ambiente](#variáveis-de-ambiente)
+- [Endpoints](#endpoints)
+- [Cenários obrigatórios de concorrência](#cenários-obrigatórios-de-concorrência--teste)
+- [Testes obrigatórios](#testes-obrigatórios--teste-que-prova)
+
 ## Destaques
 
+Decisões técnicas deste serviço, lidas pelo impacto no negócio:
 - **Correção provada, não prometida.** 330 testes unitários, 217 de integração, 6 de concorrência e
   1 com **três processos reais** (`SIGKILL`, `SIGTERM` e reinício), todos com PostgreSQL e SQS
-  reais, sem mocks de banco ou fila.
+  reais, sem mocks de banco ou fila — menos risco de incidente financeiro em produção.
 - **O banco é a última linha de defesa.** Saldo não negativo, ledger append-only (trigger),
   cadeia de lançamentos sem buracos, uma reversão por referência e idempotência são `CHECK`,
-  `UNIQUE` e triggers, não só código.
+  `UNIQUE` e triggers, não só código — **compliance regulatório**: cada centavo tem histórico
+  imutável e nem um bug de aplicação cria saldo negativo ou apaga o ledger.
 - **Concorrência por wallet.** Lock `FOR UPDATE` por wallet, com `version` como segunda defesa;
-  wallets diferentes nunca se bloqueiam.
+  wallets diferentes nunca se bloqueiam — **protege a margem no pico**: a base cresce sem que uma
+  wallet quente degrade a latência das demais.
 - **Mensageria sem perda e sem duplicata.** Inbox, saldo, ledger e outbox na mesma transação; `ack`
-  só depois do `COMMIT`; retry com backoff, DLQ explícita e ordem preservada por wallet.
+  só depois do `COMMIT`; retry com backoff, DLQ explícita e ordem preservada por wallet — **evita
+  pagamento em dobro e evento perdido**, que são perda de receita e erro de liquidação.
 - **Reconciliação.** `POST /wallets/:walletId/reconciliation` confere o saldo gravado contra o
-  ledger, e o teste de carga termina reconciliando todas as wallets criadas.
+  ledger, e o teste de carga termina reconciliando todas as wallets criadas — **detecta divergência
+  operacional sem corrigir nada em silêncio**.
 - **Auditoria de recusas.** Submissões que não viram resultado de negócio (payload inválido,
   conflito de idempotência, wallet inexistente, moeda/jogador divergentes) ficam numa trilha
   imutável e consultável por provedor (`GET /providers/:providerId/.../failures`), **fora** da chave
-  de idempotência: o provedor corrige e reenvia com a mesma chave.
+  de idempotência — **facilita a integração B2B**: o provedor se autodiagnostica, corrige e reenvia
+  com a mesma chave, reduzindo tickets de suporte e tempo de onboarding.
 - **Teste de carga honesto.** `bun run test:load` contra as três instâncias: cerca de 260–290 req/s
   em uma máquina de desenvolvimento, sem erro 5xx, 200 de 200 wallets consistentes; a cauda da
   outbox foi medida e caiu para ~5 s ([ARCHITECTURE.md, seção 16](ARCHITECTURE.md)). O custo do SQS
-  emulado é medido isoladamente por `bun run bench:sqs`.
+  emulado é medido isoladamente por `bun run bench:sqs` — **capacidade medida, não estimada**.
 - **Autenticação OIDC opcional.** O `AuthGuard` valida um bearer token do Keycloak (JWKS,
   `iss`/`aud`/`exp`), exige escopos (`wagers:submit`, `wagers:read`, `wallets:manage`) e confere o
-  `providerId` do token contra o corpo; fica desligada por padrão (`AUTH_ENABLED=false`) para a
-  demonstração — ver [ARCHITECTURE.md, seção 14](ARCHITECTURE.md).
+  `providerId` do token contra o corpo — **controle de acesso B2B** por escopo e por provedor; fica
+  desligada por padrão (`AUTH_ENABLED=false`) para a demonstração — ver
+  [ARCHITECTURE.md, seção 14](ARCHITECTURE.md).
 - **Simples de propósito.** Sem gateway nem tracing distribuído; o dashboard (Prometheus/Grafana) é
-  opcional, no profile `observability`. O que ficou de fora e por quê está em
-  [ARCHITECTURE.md, seção 17](ARCHITECTURE.md).
+  opcional, no profile `observability` — **menor custo operacional e menor superfície de falha**. O
+  que ficou de fora e por quê está em [ARCHITECTURE.md, seção 17](ARCHITECTURE.md).
 
 ## Início rápido
 
 Com Docker e [Bun](https://bun.sh) instalados:
 
+### 1. Levantar o Ambiente
+
 ```bash
 bun install
 docker compose --profile app up -d --build --wait   # Postgres, LocalStack, migrations e 3 instâncias (localhost:3001 a 3003)
+```
+
+### 2. Executar a Demonstração
+
+Com a stack no ar, rode o roteiro narrado contra uma das instâncias:
+
+```bash
 DEMO_BASE_URL=http://localhost:3001 bun run demo    # roteiro narrado: aposta, replay, conflito, pendência, SQS, reconciliação
 docker compose rm -sf migrate app-1 app-2 app-3     # desliga as instâncias; Postgres e LocalStack seguem no ar
 ```
 
 Se a porta 5432 do host já estiver em uso, veja o [Setup](#setup).
-
-**Neste documento:** [Visão geral](#visão-geral) · [Arquitetura](#arquitetura) ·
-[Como uma aposta é processada](#como-uma-aposta-é-processada) ·
-[Garantias e como são impostas](#garantias-e-como-são-impostas) · [Mensageria](#mensageria) ·
-[Várias instâncias](#várias-instâncias) · [Estrutura do código](#estrutura-do-código) ·
-[Pré-requisitos e setup](#pré-requisitos) · [Comandos](#comandos) · [Endpoints](#endpoints) ·
-[Testes que provam o enunciado](#cenários-obrigatórios-de-concorrência--teste)
 
 ## Visão geral
 
@@ -73,6 +111,22 @@ O que o serviço garante, e que o resto do documento mostra como:
   saldo gravado contra a soma do ledger.
 - **Sem estado na memória.** Qualquer instância pode morrer a qualquer momento; as outras continuam
   sem coordenação extra.
+
+## Checklist do desafio
+
+Cada exigência de negócio do enunciado, a defesa que a sustenta e onde ela é provada:
+
+| Requisito de negócio                          | Defesa implementada                                                                                                | Onde se prova                                                                        |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
+| Dinheiro exato, sem erro de ponto flutuante   | `Money` decimal, `NUMERIC(20,2)`, strings nos contratos e `bun run check:money`                                    | `test/unit/domain/money.test.ts`                                                     |
+| Prevenção de saldo negativo                   | Regra no `Wallet.debit`, `CHECK (balance >= 0)` na wallet e lock `FOR UPDATE` por wallet                           | `test/integration/schema.test.ts`, `test/concurrency/wagering-races.test.ts`         |
+| Idempotência (uma aposta, um efeito)          | `UNIQUE (provider_id, idempotency_key)` e `UNIQUE (provider_id, external_transaction_id)`, consultadas após o lock | `test/concurrency/wagering-races.test.ts`                                            |
+| Isolamento de transações concorrentes         | Lock `FOR UPDATE` por wallet + `UPDATE … WHERE version`; inbox `UNIQUE (consumer_name, message_id)`                | `test/concurrency/wagering-races.test.ts`, `test/integration/sqs-consumer.test.ts`   |
+| Consistência entre saldo e ledger             | Ledger append-only (trigger), `CHECK` aritmético, `UNIQUE (wallet_id, wallet_version)` e reconciliação             | `test/integration/invariants.test.ts`, `test/integration/reconciliation.test.ts`     |
+| Nada se perde nem se duplica entre sistemas   | Inbox, saldo, ledger e outbox na mesma transação; `ack` só após o `COMMIT`; outbox com lease e DLQ                 | `test/integration/process-wager.test.ts`, `test/integration/sqs-consumer.test.ts`    |
+| Ordem correta por jogador                     | SQS FIFO com `MessageGroupId = wallet` e claim "cabeça por wallet" na outbox                                       | `test/integration/outbox-publisher.test.ts`, `test/integration/sqs-consumer.test.ts` |
+| Rastreabilidade e integração B2B              | Ledger imutável, auditoria de recusas consultável por provedor e logs estruturados sem valores                     | `test/integration/submission-failures.test.ts`, `test/integration/logging.test.ts`   |
+| Operação em várias instâncias sem coordenação | Estado só no banco; `FOR UPDATE SKIP LOCKED` + lease e todas as unicidades no schema                               | `test/multi-instance/multi-instance.test.ts`                                         |
 
 ## Arquitetura
 
@@ -510,6 +564,9 @@ códigos para status HTTP está em `ARCHITECTURE.md`.
 
 ## Cenários obrigatórios de concorrência → teste
 
+<details>
+<summary>Ver os 8 cenários e os testes que provam cada um</summary>
+
 Testes em `test/concurrency/wagering-races.test.ts` (`bun run test:concurrency`). Para rodar um só,
 filtre pelo nome: `bun run test:concurrency -t "2×80.00"`.
 
@@ -524,7 +581,12 @@ filtre pelo nome: `bun run test:concurrency -t "2×80.00"`.
 | 7   | `ROLLBACK` ou `REFUND` entregue antes da referência                              | `REFUND before its BET → the BET wakes it and the REFUND is PROCESSED with its events` e `chain: WIN(BET) and ROLLBACK(WIN) before the BET → both PROCESSED, in order` (em `test/integration/pending-reference.test.ts`); também no roteiro do teste com três instâncias                                                          |
 | 8   | reinício do serviço com comprovação da consistência final                        | o teste com três instâncias: reinicia as instâncias derrubadas por `SIGKILL` e `SIGTERM` e confere ledger, saldos, inbox, DLQ e eventos publicados                                                                                                                                                                                |
 
+</details>
+
 ## Testes obrigatórios → teste que prova
+
+<details>
+<summary>Ver o mapeamento exigência do enunciado → teste</summary>
 
 Complementa a tabela anterior com a seção "Testes obrigatórios" do enunciado (unidade e integração).
 Os caminhos são relativos a `test/`.
@@ -556,6 +618,8 @@ Os caminhos são relativos a `test/`.
 | Métricas                                                                              | `integration/metrics.test.ts`                                             | `shows a processed BET, its replay and a conflict`; `reports the outbox backlog computed at scrape time`                                                                                                                                                                                                                         |
 | Health checks (liveness e readiness)                                                  | `integration/health.test.ts`                                              | `live → 200 without auth header`; `ready → 200 with postgres up and sqs up`; `ready → 503 within 3s when Postgres is unreachable`                                                                                                                                                                                                |
 | Reconciliação                                                                         | `integration/reconciliation.test.ts`                                      | `a wallet after BET, WIN and REFUND is consistent with zero difference`; `a diverging balance is flagged, logged without amounts, counted and never corrected`                                                                                                                                                                   |
+
+</details>
 
 Invariante verificada depois de cada teste que grava pela aplicação (integração e concorrência):
 saldo da wallet = soma do ledger, com versões contínuas (`test/integration/support/invariants.ts`).
