@@ -1073,7 +1073,32 @@ diz o que custaria e como entraria.
 
 ## 19. Próximos passos
 
+**Performance (na ordem do gargalo atual):**
+- **Vazão do publisher da outbox.** Com o claim indexado e o `markPublished`/`enqueueMany` em lote,
+  o caminho HTTP ficou mais rápido que a publicação: no teste de carga a outbox acumula (~13,5 mil
+  no pico) e drena depois. O teto agora é a latência do `SendMessageBatch` contra o SQS. Candidatos:
+  enviar os pedaços do lote em paralelo, aumentar o lote por ciclo, e medir o custo do SQS emulado
+  (LocalStack) isoladamente.
+- **Reduzir round-trips do caminho HTTP.** Restam ~10 instruções por transação. Candidatos baratos:
+  unir as duas consultas de idempotência (`findByIdempotencyKey` + `findByExternalId`) num único
+  `SELECT`; mover o `SET LOCAL lock_timeout` para o nível da conexão.
+- **Conferir `statement_timeout`/`idle_in_transaction_session_timeout`.** `pg_stat_activity` mostrou
+  `0` nas conexões, o que sugere que `driverOptions.connection` não está aplicando esses parâmetros
+  de sessão. Confirmar e, se for o caso, passá-los como `options` de startup do driver (afeta também
+  o item da seção 18 sobre migrations).
+- **Reescrever a seção 16** com os números atuais do teste de carga (vazão, latência e o
+  comportamento da outbox depois das otimizações).
+
+**Observabilidade e segurança:**
 - **Alertas** sobre as métricas já expostas (outbox lag crescendo, `wagering_dlq_messages_total`
   subindo, conflitos de lock) e um dashboard: hoje só há o endpoint de coleta.
 - **Usuário de banco só com DML** para a aplicação (`SELECT`, `INSERT`, `UPDATE`), sem `TRUNCATE`
   nem DDL; as migrations rodam com outro usuário.
+
+**Retenção de dados (prazo maior):**
+- **Crescimento do ledger e do journal.** São append-only por regra; a retenção da outbox já limita
+  a tabela de eventos, mas `wallet_ledger_entries` e `journal_entries` crescem sem limite.
+  Candidatos: particionamento por período ou arquivamento para armazenamento frio, preservando a
+  imutabilidade.
+- **Connection pooling sob pressão.** Medir a espera por conexão sob carga e dimensionar o pool
+  (hoje o padrão do MikroORM) contra o pico de concorrência.
