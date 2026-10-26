@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import type { MikroORM } from '@mikro-orm/postgresql';
 import { ProcessWagerTransactionUseCase } from '../../src/application/wager/process-wager-transaction.use-case';
 import { CreateWalletUseCase } from '../../src/application/wallet/create-wallet.use-case';
+import { ReconcileWalletUseCase } from '../../src/application/wallet/reconcile-wallet.use-case';
 import { WagerTransactionKind } from '../../src/domain/wager/wager-transaction-kind';
 import { WagerTransactionStatus } from '../../src/domain/wager/wager-transaction-status';
 import { createTestApp, type TestApp } from './support/app';
@@ -66,5 +67,45 @@ describe('journal history upgrade', () => {
     expect(rows).toEqual([{ direction: 'CREDIT' }, { direction: 'DEBIT' }]);
     const state = await financialState();
     expect(state.map((rows) => rows.length)).toEqual([1, 2, 2]);
+  });
+
+  test('upgrading a populated pre-journal database backfills every counterpart without financial mutations', async () => {
+    const walletId = await seedHistory();
+    const before = await financialState();
+    const migrator = orm.getMigrator();
+    await migrator.down({ to: 'Migration20261025000000_double_entry_journal' });
+    expect(await sql("SELECT to_regclass('public.journal_entries') AS journal")).toEqual([
+      { journal: null },
+    ]);
+    await migrator.up();
+
+    const pairs = await sql(`
+      SELECT l.direction AS wallet_direction, j.direction AS house_direction,
+             j.amount::TEXT AS amount, j.currency, j.account_id,
+             j.created_at = l.created_at AS preserves_time
+        FROM wallet_ledger_entries l
+        JOIN wager_transactions t ON t.id = l.transaction_id
+        JOIN journal_entries j ON j.transaction_id = l.transaction_id
+       ORDER BY l.wallet_version`);
+    expect(pairs).toEqual([
+      {
+        wallet_direction: 'CREDIT',
+        house_direction: 'DEBIT',
+        amount: '100.00',
+        currency: 'BRL',
+        account_id: 'house:internal:BRL',
+        preserves_time: true,
+      },
+      {
+        wallet_direction: 'DEBIT',
+        house_direction: 'CREDIT',
+        amount: '25.01',
+        currency: 'BRL',
+        account_id: 'house:provider-BRL:BRL',
+        preserves_time: true,
+      },
+    ]);
+    expect(await financialState()).toEqual(before);
+    expect((await t.app.get(ReconcileWalletUseCase).execute(walletId)).consistent).toBe(true);
   });
 });
