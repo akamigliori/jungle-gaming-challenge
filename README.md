@@ -261,6 +261,11 @@ Na primeira subida do volume, o container também cria o banco `wagering_test`,
 usado pelos testes de integração. Se o volume já existia antes, crie-o à mão:
 `docker compose exec postgres createdb -U wagering wagering_test`.
 
+`bun run migration:up` (e o serviço `migrate` do Compose) também cria o papel `wagering_app` e
+aplica os grants: a app roda com esse papel, que só tem DML (`SELECT`, `INSERT`, `UPDATE` e
+`DELETE` apenas na outbox, para a retenção) — sem DDL nem `TRUNCATE`. As migrations continuam
+rodando como o dono (`DB_USER`, `wagering`). É idempotente e roda mesmo num volume já migrado.
+
 ## Três instâncias com Docker
 
 O profile `app` do Compose constrói a imagem da aplicação, aplica as migrations (serviço `migrate`,
@@ -292,6 +297,22 @@ bun run start
 
 Os clients são `provider-a` e `provider-b` (`wagers:submit`, `wagers:read`) e `backoffice`
 (`wallets:manage`), todos `client_credentials`. Detalhes em [ARCHITECTURE.md, seção 14](ARCHITECTURE.md).
+
+### Observabilidade (opcional)
+
+O profile `observability` sobe o Prometheus (coleta o `/metrics` das três instâncias e avalia as
+regras de alerta) e o Grafana com o dashboard provisionado. Não há Alertmanager: o disparo aparece
+no Prometheus e no Grafana.
+
+```bash
+docker compose --profile app --profile observability up -d --build --wait
+# Grafana:    http://localhost:3000  (admin/admin) → dashboard "Wagering — visão geral"
+# Prometheus: http://localhost:9090  (Alerts e Targets)
+```
+
+Alertas: instância fora do ar (`up == 0`), lag da outbox acima de 60 s, backlog acima de 5.000,
+mensagens novas na DLQ e mais de 10 conflitos de lock em 5 min. O Prometheus guarda 6 h de séries
+(256 MB) e o Grafana roda com 384 MB.
 
 ## Comandos
 
@@ -383,9 +404,11 @@ vê-los, defina `TEST_LOG_LEVEL` (ex.: `TEST_LOG_LEVEL=info bun run test:integra
 | `LOG_LEVEL`                          | `info`                        | nível de log do pino (`silent` desliga)                                                                                                  |
 | `DB_HOST`                            | `localhost`                   | host do Postgres                                                                                                                         |
 | `DB_PORT`                            | `5432`                        | porta do Postgres                                                                                                                        |
-| `DB_USER`                            | `wagering`                    | usuário do Postgres                                                                                                                      |
+| `DB_USER`                            | `wagering`                    | usuário do Postgres (dono: roda as migrations; no compose a app usa `wagering_app`)                                                      |
 | `DB_PASSWORD`                        | `wagering`                    | senha do Postgres                                                                                                                        |
 | `DB_NAME`                            | `wagering`                    | banco da aplicação                                                                                                                       |
+| `DB_APP_USER`                        | `wagering_app`                | papel DML-only da app, criado pelo passo de grants após as migrations                                                                    |
+| `DB_APP_PASSWORD`                    | `wagering_app`                | senha do papel DML-only da app                                                                                                           |
 | `TEST_DB_NAME`                       | `wagering_test`               | banco usado pelos testes de integração                                                                                                   |
 | `TEST_LOG_LEVEL`                     | `silent`                      | nível de log da aplicação nos testes de integração                                                                                       |
 | `SQS_ENDPOINT`                       | `http://localhost:4566`       | endpoint do SQS (LocalStack)                                                                                                             |
