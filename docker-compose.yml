@@ -9,6 +9,9 @@ x-app: &app
   environment:
     DB_HOST: postgres
     DB_PORT: "5432"
+    # a app roda com o papel DML-only; as migrations usam o dono (`wagering`)
+    DB_USER: wagering_app
+    DB_PASSWORD: wagering_app
     SQS_ENDPOINT: http://localstack:4566
   depends_on:
     migrate:
@@ -76,6 +79,9 @@ services:
     environment:
       DB_HOST: postgres
       DB_PORT: "5432"
+      # migrations rodam como o dono do banco, que também cria a role DML-only da app
+      DB_USER: wagering
+      DB_PASSWORD: wagering
     depends_on:
       postgres:
         condition: service_healthy
