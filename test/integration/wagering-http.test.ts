@@ -216,6 +216,66 @@ describe('POST /wagering/transactions', () => {
     expect(got.body).toMatchObject({ failureCode: 'CURRENCY_MISMATCH', balanceAfter: null });
   });
 
+  test.each(['USD', 'BRL'])(
+    'PLAYER_MISMATCH in %s → stable snapshot on original, replay and GET without a financial effect',
+    async (currency) => {
+      const walletId = await createWallet();
+      const input = { playerId: UNKNOWN_ID, currency };
+      const expectedBalance = currency === 'BRL' ? { amount: '100.00', currency: 'BRL' } : null;
+
+      const first = await submit(walletId, input);
+      const replay = await submit(walletId, input);
+      const got = await send('GET', `/wagering/transactions/${first.body.transactionId}`);
+      const byExternalId = await send('GET', '/providers/provider-a/wagering/transactions/bet-1');
+
+      expect(first.status).toBe(422);
+      expect(first.body).toMatchObject({
+        status: 'REJECTED',
+        error: { code: 'PLAYER_MISMATCH', retryable: false },
+        balance: expectedBalance,
+        idempotentReplay: false,
+      });
+      expect(replay.status).toBe(422);
+      expect(replay.headers.get('idempotent-replayed')).toBe('true');
+      expect(replay.body).toEqual({ ...first.body, idempotentReplay: true });
+      expect(got.status).toBe(200);
+      expect(got.body).toMatchObject({
+        failureCode: 'PLAYER_MISMATCH',
+        balanceAfter: expectedBalance,
+      });
+      expect(byExternalId.status).toBe(200);
+      expect(byExternalId.body).toEqual(got.body);
+
+      const [stored] = await orm.em.getConnection().execute<
+        { balance_after: string | null; wallet_version_after: number | null }[]
+      >('SELECT balance_after, wallet_version_after FROM wager_transactions WHERE id = ?', [
+        first.body.transactionId,
+      ]);
+      expect(stored).toEqual({
+        balance_after: expectedBalance?.amount ?? null,
+        wallet_version_after: expectedBalance === null ? null : 1,
+      });
+
+      const wallet = await send('GET', `/wallets/${walletId}`);
+      expect(wallet.status).toBe(200);
+      expect(wallet.body).toMatchObject({
+        balance: { amount: '100.00', currency: 'BRL' },
+        version: 1,
+      });
+      const [counts] = await orm.em.getConnection().execute<
+        { entries: number; transactions: number; events: number }[]
+      >(
+        `SELECT
+           (SELECT COUNT(*)::INT FROM wallet_ledger_entries WHERE wallet_id = ?) AS entries,
+           (SELECT COUNT(*)::INT FROM wager_transactions WHERE wallet_id = ?) AS transactions,
+           (SELECT COUNT(*)::INT FROM outbox_messages WHERE aggregate_id = ?) AS events`,
+        [walletId, walletId, walletId],
+      );
+      // Só o crédito de abertura, a transação OPENING e uma rejeição com o seu evento.
+      expect(counts).toEqual({ entries: 1, transactions: 2, events: 3 });
+    },
+  );
+
   test('REFUND before its BET → 202 PENDING_REFERENCE with null balance', async () => {
     const walletId = await createWallet();
 

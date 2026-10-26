@@ -122,7 +122,24 @@ describe('decideWager BET', () => {
 
   test('other player -> PLAYER_MISMATCH, checked before currency', () => {
     const tx = makeTx(K.Bet, '10.00', { playerId: 'other', currency: 'USD' });
-    expect(run(tx).decision).toEqual({ outcome: 'REJECTED', code: 'PLAYER_MISMATCH' });
+    const { wallet, decision } = run(tx);
+
+    expect(decision).toEqual({ outcome: 'REJECTED', code: 'PLAYER_MISMATCH' });
+    expect(tx.balanceAfter).toBeUndefined();
+    expect(tx.walletVersionAfter).toBeUndefined();
+    expect(wallet.balance.toJSON()).toEqual({ amount: '100.00', currency: 'BRL' });
+    expect(wallet.version).toBe(1);
+  });
+
+  test('other player in the same currency -> PLAYER_MISMATCH keeps the observed balance', () => {
+    const tx = makeTx(K.Bet, '10.00', { playerId: 'other' });
+    const { wallet, decision } = run(tx);
+
+    expect(decision).toEqual({ outcome: 'REJECTED', code: 'PLAYER_MISMATCH' });
+    expect(tx.balanceAfter?.toJSON()).toEqual({ amount: '100.00', currency: 'BRL' });
+    expect(tx.walletVersionAfter).toBe(1);
+    expect(wallet.balance.toJSON()).toEqual({ amount: '100.00', currency: 'BRL' });
+    expect(wallet.version).toBe(1);
   });
 });
 
