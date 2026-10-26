@@ -115,6 +115,14 @@ async function rowOf(id: string): Promise<Row | undefined> {
   return row;
 }
 
+/** Data fixa no passado: NOW() tem microssegundos e pode ficar à frente do Date do claim. */
+async function makeDue(id: string): Promise<void> {
+  await sql('UPDATE wager_transactions SET next_reference_attempt_at = ? WHERE id = ?', [
+    new Date(0),
+    id,
+  ]);
+}
+
 async function nextAttemptOf(id: string): Promise<number> {
   const [row] = await sql<{ next_attempt: string }>(
     'SELECT next_reference_attempt_at AS next_attempt FROM wager_transactions WHERE id = ?',
@@ -378,9 +386,7 @@ describe('ResolvePendingReferenceUseCase', () => {
   }
 
   async function claimTarget(transactionId: string, walletId: string) {
-    await sql('UPDATE wager_transactions SET next_reference_attempt_at = NOW() WHERE id = ?', [
-      transactionId,
-    ]);
+    await makeDue(transactionId);
     const claims = await t.app
       .get<WagerTransactionRepository>(WAGER_TRANSACTION_REPOSITORY)
       .claimDuePendingReferences({ now: new Date(), limit: 100, leaseMs: 30_000 });
@@ -392,9 +398,7 @@ describe('ResolvePendingReferenceUseCase', () => {
   test('an expired claim cannot consume another attempt after a second worker reschedules', async () => {
     const walletId = await createWallet();
     const refund = await submit(refundOf(walletId, 'bet-1'));
-    await sql('UPDATE wager_transactions SET next_reference_attempt_at = NOW() WHERE id = ?', [
-      refund.transaction.id,
-    ]);
+    await makeDue(refund.transaction.id);
     const resolver = anotherInstance();
     const outcomes: string[] = [];
     let claimed!: () => void;
@@ -425,9 +429,7 @@ describe('ResolvePendingReferenceUseCase', () => {
     try {
       await ready;
       // Expiração controlada: o segundo worker assume enquanto o primeiro ainda segura o item.
-      await sql('UPDATE wager_transactions SET next_reference_attempt_at = NOW() WHERE id = ?', [
-        refund.transaction.id,
-      ]);
+      await makeDue(refund.transaction.id);
       expect(await newWorker.runOnce()).toEqual({ claimed: 1 });
       expect((await rowOf(refund.transaction.id))?.reference_attempts).toBe(1);
     } finally {
@@ -474,9 +476,7 @@ describe('ResolvePendingReferenceUseCase', () => {
     const walletId = await createWallet();
     const refund = await submit(refundOf(walletId, 'bet-1'));
     const target = await claimTarget(refund.transaction.id, walletId);
-    await sql('UPDATE wager_transactions SET next_reference_attempt_at = NOW() WHERE id = ?', [
-      target.transactionId,
-    ]);
+    await makeDue(target.transactionId);
     expect(await anotherInstance().execute(target)).toEqual({ outcome: 'skipped' });
     expect((await rowOf(target.transactionId))?.reference_attempts).toBe(0);
     const recovered = await claimTarget(target.transactionId, walletId);
