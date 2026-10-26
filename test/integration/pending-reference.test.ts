@@ -35,7 +35,10 @@ import { ResolvePendingReferenceUseCase } from '../../src/application/wager/reso
 import { CreateWalletUseCase } from '../../src/application/wallet/create-wallet.use-case';
 import { WagerTransactionKind } from '../../src/domain/wager/wager-transaction-kind';
 import { WagerTransactionStatus } from '../../src/domain/wager/wager-transaction-status';
+import { loadConfig } from '../../src/infrastructure/config/config';
 import { isTransientDbError } from '../../src/infrastructure/persistence/pg-errors';
+import type { WorkerLogger } from '../../src/infrastructure/workers/outbox-publisher.worker';
+import { PendingReferenceWorker } from '../../src/infrastructure/workers/pending-reference.worker';
 import { createTestApp, type TestApp } from './support/app';
 import { resetDb, withTestDb } from './support/db';
 import { assertLedgerInvariant } from './support/invariants';
@@ -373,6 +376,66 @@ describe('ResolvePendingReferenceUseCase', () => {
       referenceRetry: RETRY_POLICY,
     });
   }
+
+  test('an expired claim cannot consume another attempt after a second worker reschedules', async () => {
+    const walletId = await createWallet();
+    const refund = await submit(refundOf(walletId, 'bet-1'));
+    await sql('UPDATE wager_transactions SET next_reference_attempt_at = NOW() WHERE id = ?', [
+      refund.transaction.id,
+    ]);
+    const resolver = anotherInstance();
+    const outcomes: string[] = [];
+    let claimed!: () => void;
+    let release!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      claimed = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const delayed = {
+      execute: async (p: Parameters<ResolvePendingReferenceUseCase['execute']>[0]) => {
+        claimed();
+        await gate;
+        const result = await resolver.execute(p);
+        outcomes.push(result.outcome);
+        return result;
+      },
+    } as ResolvePendingReferenceUseCase;
+    const logger = { info() {}, error() {}, warn() {} } as WorkerLogger;
+    const config = loadConfig({ PENDING_REFERENCE_BATCH_SIZE: '1' });
+    const repo = t.app.get<WagerTransactionRepository>(WAGER_TRANSACTION_REPOSITORY);
+    const clock = t.app.get<Clock>(CLOCK);
+    const oldWorker = new PendingReferenceWorker(delayed, repo, clock, config, logger);
+    const newWorker = new PendingReferenceWorker(resolver, repo, clock, config, logger);
+
+    const oldCycle = oldWorker.runOnce();
+    try {
+      await ready;
+      // Expiração controlada: o segundo worker assume enquanto o primeiro ainda segura o item.
+      await sql('UPDATE wager_transactions SET next_reference_attempt_at = NOW() WHERE id = ?', [
+        refund.transaction.id,
+      ]);
+      expect(await newWorker.runOnce()).toEqual({ claimed: 1 });
+      expect((await rowOf(refund.transaction.id))?.reference_attempts).toBe(1);
+    } finally {
+      release();
+      await oldCycle;
+    }
+
+    expect(outcomes).toEqual(['skipped']);
+    expect((await rowOf(refund.transaction.id))?.reference_attempts).toBe(1);
+    expect(await ledgerCountOf(refund.transaction.id)).toBe(0);
+    expect((await outboxOf(refund.transaction.id)).map((e) => e.event_type)).toEqual([
+      'WagerTransactionPendingReference',
+    ]);
+
+    await submit(command(walletId));
+    expect(await newWorker.runOnce()).toEqual({ claimed: 1 });
+    expect((await rowOf(refund.transaction.id))?.status).toBe('PROCESSED');
+    expect(await balanceOf(walletId)).toBe('100.00');
+    expect(await ledgerCountOf(refund.transaction.id)).toBe(1);
+  });
 
   test('two instances on the same due pending → one credit, the other is skipped', async () => {
     const walletId = await createWallet();
