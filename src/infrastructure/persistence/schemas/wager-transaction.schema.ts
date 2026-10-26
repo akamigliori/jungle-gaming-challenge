@@ -20,6 +20,7 @@ export interface WagerTransactionRecord {
   failureCode: string | null;
   referenceAttempts: number;
   nextReferenceAttemptAt: Date | null;
+  referenceClaimToken?: string | null;
   balanceAfter: string | null;
   walletVersionAfter: number | null;
   processedAt: Date | null;
@@ -49,6 +50,7 @@ export const WagerTransactionSchema = new EntitySchema<WagerTransactionRecord>({
     failureCode: { type: 'string', nullable: true },
     referenceAttempts: { type: 'integer' },
     nextReferenceAttemptAt: { type: 'Date', columnType: 'timestamptz', nullable: true },
+    referenceClaimToken: { type: 'uuid', nullable: true },
     balanceAfter: { type: 'decimal', precision: 20, scale: 2, nullable: true },
     walletVersionAfter: { type: 'integer', nullable: true },
     processedAt: { type: 'Date', columnType: 'timestamptz', nullable: true },

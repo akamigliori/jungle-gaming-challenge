@@ -5,6 +5,7 @@ import type {
   WagerTransactionRepository,
 } from '../../../src/application/ports/wager-transaction.repository';
 import type {
+  ResolvePendingReferenceParams,
   ResolvePendingReferenceResult,
   ResolvePendingReferenceUseCase,
 } from '../../../src/application/wager/resolve-pending-reference.use-case';
@@ -58,11 +59,11 @@ function fakeRepository(claim: () => Promise<ClaimedPendingReference[]>) {
 }
 
 function fakeUseCase(
-  run: (p: { transactionId: string; walletId: string }) => Promise<ResolvePendingReferenceResult>,
+  run: (p: ResolvePendingReferenceParams) => Promise<ResolvePendingReferenceResult>,
 ) {
   const calls: string[] = [];
   const useCase = {
-    execute: (p: { transactionId: string; walletId: string }) => {
+    execute: (p: ResolvePendingReferenceParams) => {
       calls.push(p.transactionId);
       return run(p);
     },
@@ -99,12 +100,15 @@ describe('PendingReferenceWorker', () => {
   test('runOnce resolves each claimed item and reports how many were claimed', async () => {
     const repo = fakeRepository(
       once([
-        { id: 'a1', walletId: 'wa' },
-        { id: 'b1', walletId: 'wb' },
-        { id: 'a2', walletId: 'wa' },
+        { id: 'a1', walletId: 'wa', claimToken: 'claim-token' },
+        { id: 'b1', walletId: 'wb', claimToken: 'claim-token' },
+        { id: 'a2', walletId: 'wa', claimToken: 'claim-token' },
       ]),
     );
-    const fake = fakeUseCase(async () => RESOLVED);
+    const fake = fakeUseCase(async ({ claimToken }) => {
+      expect(claimToken).toBe('claim-token');
+      return RESOLVED;
+    });
     const worker = new PendingReferenceWorker(
       fake.useCase,
       repo.repo,
@@ -119,9 +123,9 @@ describe('PendingReferenceWorker', () => {
   test('items of the same wallet run in claim order, one at a time; wallets run in parallel', async () => {
     const repo = fakeRepository(
       once([
-        { id: 'a1', walletId: 'wa' },
-        { id: 'b1', walletId: 'wb' },
-        { id: 'a2', walletId: 'wa' },
+        { id: 'a1', walletId: 'wa', claimToken: 'claim-token' },
+        { id: 'b1', walletId: 'wb', claimToken: 'claim-token' },
+        { id: 'a2', walletId: 'wa', claimToken: 'claim-token' },
       ]),
     );
     const events: string[] = [];
@@ -148,8 +152,8 @@ describe('PendingReferenceWorker', () => {
   test('a failing item is logged and the next items still run', async () => {
     const repo = fakeRepository(
       once([
-        { id: 'a1', walletId: 'wa' },
-        { id: 'a2', walletId: 'wa' },
+        { id: 'a1', walletId: 'wa', claimToken: 'claim-token' },
+        { id: 'a2', walletId: 'wa', claimToken: 'claim-token' },
       ]),
     );
     const fake = fakeUseCase(async ({ transactionId }) => {
@@ -161,15 +165,18 @@ describe('PendingReferenceWorker', () => {
     expect(await worker.runOnce()).toEqual({ claimed: 2 });
     expect(fake.calls).toEqual(['a1', 'a2']);
     expect(errors).toHaveLength(1);
-    expect(errors[0]).toMatchObject({ transactionId: 'a1', walletId: 'wa' });
+    expect(errors[0]).toMatchObject({
+      transactionId: 'a1',
+      walletId: 'wa',
+    });
   });
 
   test('each outcome is logged with the ids and the attempts', async () => {
     const repo = fakeRepository(
       once([
-        { id: 'a1', walletId: 'wa' },
-        { id: 'b1', walletId: 'wb' },
-        { id: 'c1', walletId: 'wc' },
+        { id: 'a1', walletId: 'wa', claimToken: 'claim-token' },
+        { id: 'b1', walletId: 'wb', claimToken: 'claim-token' },
+        { id: 'c1', walletId: 'wc', claimToken: 'claim-token' },
       ]),
     );
     const outcomes: Record<string, ResolvePendingReferenceResult> = {
@@ -215,7 +222,7 @@ describe('PendingReferenceWorker', () => {
   test('shutdown waits for the in-flight cycle and no cycle starts after it', async () => {
     let release: () => void = () => {};
     let finished = false;
-    const repo = fakeRepository(once([{ id: 'a1', walletId: 'wa' }]));
+    const repo = fakeRepository(once([{ id: 'a1', walletId: 'wa', claimToken: 'claim-token' }]));
     const fake = fakeUseCase(async () => {
       await new Promise<void>((resolve) => {
         release = resolve;

@@ -6,10 +6,11 @@ export interface ClaimDuePendingReferencesParams {
   leaseMs: number;
 }
 
-/** Pendência reservada pelo worker: basta o id e a wallet que precisa ser travada. */
+/** Pendência reservada pelo worker; o token identifica exclusivamente esta reserva. */
 export interface ClaimedPendingReference {
   id: string;
   walletId: string;
+  claimToken: string;
 }
 
 export interface WakeDependentsParams {
@@ -29,6 +30,12 @@ export interface IdempotencyMatch {
 export interface WagerTransactionRepository {
   add(tx: WagerTransaction): Promise<void>;
   findById(id: string): Promise<WagerTransaction | null>;
+  /** Sob o lock da wallet, trava e recarrega somente o claim atual e ainda vigente. */
+  lockClaimedPendingReference(
+    id: string,
+    claimToken: string,
+    at: Date,
+  ): Promise<WagerTransaction | null>;
   findByIdempotencyKey(providerId: string, key: string): Promise<WagerTransaction | null>;
   findByExternalId(
     providerId: string,
@@ -63,7 +70,8 @@ export interface WagerTransactionRepository {
   /**
    * Em transação própria e curta, reserva até `limit` pendências vencidas (mais antigas
    * primeiro), ignorando as que outra instância está reservando, e empurra a próxima tentativa
-   * delas para `now + leaseMs`. Se quem reservou morrer, elas voltam quando o prazo vence.
+   * delas para `now + leaseMs`, com um token novo por reserva. Se quem reservou morrer, elas
+   * voltam quando o prazo vence. Preserva a ordem da seleção no resultado.
    */
   claimDuePendingReferences(
     params: ClaimDuePendingReferencesParams,
