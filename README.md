@@ -261,6 +261,11 @@ Na primeira subida do volume, o container também cria o banco `wagering_test`,
 usado pelos testes de integração. Se o volume já existia antes, crie-o à mão:
 `docker compose exec postgres createdb -U wagering wagering_test`.
 
+`bun run migration:up` (e o serviço `migrate` do Compose) também cria o papel `wagering_app` e
+aplica os grants: a app roda com esse papel, que só tem DML (`SELECT`, `INSERT`, `UPDATE` e
+`DELETE` apenas na outbox, para a retenção) — sem DDL nem `TRUNCATE`. As migrations continuam
+rodando como o dono (`DB_USER`, `wagering`). É idempotente e roda mesmo num volume já migrado.
+
 ## Três instâncias com Docker
 
 O profile `app` do Compose constrói a imagem da aplicação, aplica as migrations (serviço `migrate`,
@@ -383,9 +388,11 @@ vê-los, defina `TEST_LOG_LEVEL` (ex.: `TEST_LOG_LEVEL=info bun run test:integra
 | `LOG_LEVEL`                          | `info`                        | nível de log do pino (`silent` desliga)                                                                                                  |
 | `DB_HOST`                            | `localhost`                   | host do Postgres                                                                                                                         |
 | `DB_PORT`                            | `5432`                        | porta do Postgres                                                                                                                        |
-| `DB_USER`                            | `wagering`                    | usuário do Postgres                                                                                                                      |
+| `DB_USER`                            | `wagering`                    | usuário do Postgres (dono: roda as migrations; no compose a app usa `wagering_app`)                                                      |
 | `DB_PASSWORD`                        | `wagering`                    | senha do Postgres                                                                                                                        |
 | `DB_NAME`                            | `wagering`                    | banco da aplicação                                                                                                                       |
+| `DB_APP_USER`                        | `wagering_app`                | papel DML-only da app, criado pelo passo de grants após as migrations                                                                    |
+| `DB_APP_PASSWORD`                    | `wagering_app`                | senha do papel DML-only da app                                                                                                           |
 | `TEST_DB_NAME`                       | `wagering_test`               | banco usado pelos testes de integração                                                                                                   |
 | `TEST_LOG_LEVEL`                     | `silent`                      | nível de log da aplicação nos testes de integração                                                                                       |
 | `SQS_ENDPOINT`                       | `http://localhost:4566`       | endpoint do SQS (LocalStack)                                                                                                             |
