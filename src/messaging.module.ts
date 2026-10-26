@@ -7,6 +7,7 @@ import { OUTBOX_REPOSITORY, type OutboxRepository } from './application/ports/ou
 import { APP_CONFIG, type AppConfig } from './infrastructure/config/config';
 import { SqsEventPublisher } from './infrastructure/sqs/sqs-event-publisher';
 import { OutboxPublisherWorker } from './infrastructure/workers/outbox-publisher.worker';
+import { OutboxRetentionWorker } from './infrastructure/workers/outbox-retention.worker';
 
 /**
  * Publicação dos eventos da outbox: caso de uso (montado por factory, sem decorators na
@@ -32,9 +33,11 @@ import { OutboxPublisherWorker } from './infrastructure/workers/outbox-publisher
           metrics,
           batchSize: config.outboxPublisher.batchSize,
           leaseMs: config.outboxPublisher.leaseMs,
+          concurrency: config.outboxPublisher.concurrency,
         }),
     },
     OutboxPublisherWorker,
+    OutboxRetentionWorker,
   ],
 })
 export class MessagingModule {}

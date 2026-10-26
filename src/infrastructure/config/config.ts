@@ -25,6 +25,15 @@ export interface AppConfig {
     pollIntervalMs: number;
     batchSize: number;
     leaseMs: number;
+    /** Máximo de chamadas `SendMessageBatch` simultâneas num ciclo. */
+    concurrency: number;
+  };
+  outboxRetention: {
+    enabled: boolean;
+    pollIntervalMs: number;
+    /** Eventos publicados há mais tempo que isto são apagados. */
+    maxAgeMs: number;
+    batchSize: number;
   };
   consumer: {
     enabled: boolean;
@@ -57,6 +66,10 @@ export interface AppConfig {
 /** Tamanho do lote do worker de pendências (o mesmo da outbox). */
 const PENDING_REFERENCE_BATCH_SIZE = 50;
 
+/** Prazo padrão de retenção da outbox: eventos publicados há 7 dias ou mais. */
+const MS_PER_DAY = 86_400_000;
+const OUTBOX_RETENTION_MAX_AGE_MS = 7 * MS_PER_DAY;
+
 /** Folga do timeout HTTP do long poll sobre o `WaitTimeSeconds`. */
 export const LONG_POLL_TIMEOUT_MARGIN_MS = 5000;
 const MS_PER_SECOND = 1000;
@@ -81,6 +94,15 @@ const fieldsSchema = z.object({
   OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(250),
   OUTBOX_BATCH_SIZE: z.coerce.number().int().positive().max(1000).default(50),
   OUTBOX_LEASE_MS: z.coerce.number().int().positive().default(30_000),
+  OUTBOX_PUBLISH_CONCURRENCY: z.coerce.number().int().positive().max(50).default(5),
+  OUTBOX_RETENTION_ENABLED: z.stringbool().default(true),
+  OUTBOX_RETENTION_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
+  OUTBOX_RETENTION_MAX_AGE_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(OUTBOX_RETENTION_MAX_AGE_MS),
+  OUTBOX_RETENTION_BATCH_SIZE: z.coerce.number().int().positive().max(100_000).default(1000),
   SQS_CONSUMER_ENABLED: z.stringbool().default(true),
   SQS_CONSUMER_LOOPS: z.coerce.number().int().positive().default(2),
   // 2 laços × 4 mensagens = 8 transações ao mesmo tempo, deixando conexões do pool de 10 para HTTP e workers
@@ -170,6 +192,13 @@ export function loadConfig(env: Env = process.env): AppConfig {
       pollIntervalMs: e.OUTBOX_POLL_INTERVAL_MS,
       batchSize: e.OUTBOX_BATCH_SIZE,
       leaseMs: e.OUTBOX_LEASE_MS,
+      concurrency: e.OUTBOX_PUBLISH_CONCURRENCY,
+    },
+    outboxRetention: {
+      enabled: e.OUTBOX_RETENTION_ENABLED,
+      pollIntervalMs: e.OUTBOX_RETENTION_POLL_INTERVAL_MS,
+      maxAgeMs: e.OUTBOX_RETENTION_MAX_AGE_MS,
+      batchSize: e.OUTBOX_RETENTION_BATCH_SIZE,
     },
     consumer: {
       enabled: e.SQS_CONSUMER_ENABLED,

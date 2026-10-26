@@ -20,6 +20,12 @@ export interface WakeDependentsParams {
   now: Date;
 }
 
+/** Resultado da consulta de idempotência: o casamento por chave e o por id externo, numa leitura. */
+export interface IdempotencyMatch {
+  byKey: WagerTransaction | null;
+  byExternalId: WagerTransaction | null;
+}
+
 export interface WagerTransactionRepository {
   add(tx: WagerTransaction): Promise<void>;
   findById(id: string): Promise<WagerTransaction | null>;
@@ -28,6 +34,16 @@ export interface WagerTransactionRepository {
     providerId: string,
     externalTransactionId: string,
   ): Promise<WagerTransaction | null>;
+  /**
+   * Consulta de idempotência numa única leitura: devolve a transação que casa com a chave de
+   * idempotência e a que casa com o id externo (a chave tem precedência: uma linha que casa com
+   * ambos sai só em `byKey`).
+   */
+  findByIdempotency(
+    providerId: string,
+    idempotencyKey: string,
+    externalTransactionId: string,
+  ): Promise<IdempotencyMatch>;
   /** Verdadeiro se existe um REFUND/ROLLBACK `PROCESSED` apontando para a transação. */
   isReversed(transactionId: string): Promise<boolean>;
 

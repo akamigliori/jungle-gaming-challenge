@@ -19,6 +19,12 @@ export class MikroOrmOutboxRepository implements OutboxRepository {
     await this.em.insert(OutboxSchema, toRecord(message));
   }
 
+  /** `INSERT` em lote (uma única instrução) na mesma transação da mudança. */
+  async enqueueMany(messages: readonly OutboxMessage[]): Promise<void> {
+    if (messages.length === 0) return;
+    await this.em.insertMany(OutboxSchema, messages.map(toRecord));
+  }
+
   /**
    * `FOR UPDATE SKIP LOCKED`: duas instâncias reservando ao mesmo tempo nunca pegam a mesma
    * linha (uma pula as que a outra travou). No mesmo `COMMIT`, o `next_attempt_at` vai para
@@ -28,6 +34,10 @@ export class MikroOrmOutboxRepository implements OutboxRepository {
    * elegível quando nenhuma versão anterior da mesma wallet ainda está não publicada. Enquanto a
    * cabeça (menor `wallet_version`) está em voo — mesmo travada por outra instância —, as versões
    * seguintes não aparecem para ninguém, então nenhum publisher as ultrapassa.
+   *
+   * A ordem por `next_attempt_at` (em vez de `occurred_at`) usa o índice parcial
+   * `outbox_unpublished_idx` e evita ordenar todo o backlog pendente a cada ciclo; como a ordem
+   * por wallet já vem do `NOT EXISTS`, `occurred_at` é redundante aqui.
    */
   async claimDue({ now, limit, leaseMs }: ClaimDueParams): Promise<OutboxMessage[]> {
     const leaseUntil = new Date(now.getTime() + leaseMs);
@@ -44,7 +54,7 @@ export class MikroOrmOutboxRepository implements OutboxRepository {
                 AND o.wallet_version IS NOT NULL
                 AND prev.wallet_version < o.wallet_version
             )
-          ORDER BY o.occurred_at, o.id
+          ORDER BY o.next_attempt_at, o.id
           LIMIT ?
             FOR UPDATE SKIP LOCKED`,
         [now, limit],
@@ -61,10 +71,11 @@ export class MikroOrmOutboxRepository implements OutboxRepository {
   }
 
   /** `published_at IS NULL` no filtro: a segunda marcação (corrida após lease vencido) é no-op. */
-  async markPublished(id: string, at: Date): Promise<void> {
+  async markPublished(ids: readonly string[], at: Date): Promise<void> {
+    if (ids.length === 0) return;
     await this.em.execute(
-      'UPDATE outbox_messages SET published_at = ? WHERE id = ? AND published_at IS NULL',
-      [at, id],
+      'UPDATE outbox_messages SET published_at = ? WHERE id IN (?) AND published_at IS NULL',
+      [at, ids],
     );
   }
 
@@ -88,6 +99,26 @@ export class MikroOrmOutboxRepository implements OutboxRepository {
         claimedUntil,
       ],
     );
+  }
+
+  /**
+   * Deleção em lote, do mais antigo para o mais novo, dentro de uma transação curta: `LIMIT` no
+   * `IN` evita apagar muita coisa de uma vez e estourar o `statement_timeout`. Só toca linhas já
+   * publicadas (`published_at IS NOT NULL`), nunca eventos ainda em retry.
+   */
+  async deletePublishedOlderThan(cutoff: Date, limit: number): Promise<number> {
+    const deleted = await this.em.execute<{ id: string }[]>(
+      `DELETE FROM outbox_messages
+        WHERE id IN (
+          SELECT id FROM outbox_messages
+           WHERE published_at IS NOT NULL AND published_at < ?
+           ORDER BY published_at
+           LIMIT ?
+        )
+        RETURNING id`,
+      [cutoff, limit],
+    );
+    return deleted.length;
   }
 }
 

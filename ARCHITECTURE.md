@@ -428,14 +428,17 @@ da transação: o envio só acontece depois, a partir do que já está confirmad
 `PublishOutboxUseCase.runOnce()` a cada `OUTBOX_POLL_INTERVAL_MS` (250 ms). Um ciclo:
 1. **Reserva** (transação curta e própria):
    `SELECT ... FROM outbox_messages o WHERE published_at IS NULL AND next_attempt_at <= $agora
-   AND NOT EXISTS (versão menor da mesma wallet ainda não publicada) ORDER BY occurred_at, id
+   AND NOT EXISTS (versão menor da mesma wallet ainda não publicada) ORDER BY next_attempt_at, id
    LIMIT $lote FOR UPDATE SKIP LOCKED` e, na mesma transação, `next_attempt_at = $agora + lease`
    (30 s) para as linhas escolhidas; `COMMIT`. O `NOT EXISTS` é a cabeça por wallet da seção
    "Ordem estrita por wallet".
 2. **Publica** fora de qualquer transação, em `wagering-events.fifo`, com
    `MessageGroupId = aggregateId` (a wallet) e `MessageDeduplicationId = eventId`; o corpo é o
    envelope JSON gravado no `payload`. O lote inteiro é enviado em chamadas de até 10
-   (`SendMessageBatch`): menos round-trips ao SQS do que um `SendMessage` por evento.
+   (`SendMessageBatch`), com até `OUTBOX_PUBLISH_CONCURRENCY` chamadas simultâneas: sobrepõe a
+   latência do envio sem disparar todo o lote de uma vez. A ordem por wallet não depende da
+   concorrência — o claim garante no máximo um evento de saldo por wallet por ciclo (cabeça por
+   wallet), e os eventos sem versão seguem melhor-esforço (seção "Ordem estrita por wallet").
 3. **Registra** o resultado por entrada, em escritas curtas e separadas: sucesso →
    `UPDATE ... SET published_at = $agora WHERE id = $id AND published_at IS NULL`; falha →
    `attempts + 1`, `next_attempt_at` com backoff exponencial e jitter (1 s, 2 s, 4 s ... até 5 min)
@@ -500,6 +503,16 @@ acaso da divisão entre publishers: ela é garantida no banco, e o `MessageGroup
 preserva dentro da fila FIFO. Eventos de transação (`wallet_version NULL`) não têm versão e seguem
 melhor-esforço, como antes; o consumidor que precisa de ordem de saldo usa o `walletVersion` do
 payload como referência. O índice parcial `outbox_balance_unpublished_idx` serve o filtro de cabeça.
+
+**Retenção.** Eventos já publicados ficam na tabela até o `OutboxRetentionWorker` apagá-los: a cada
+`OUTBOX_RETENTION_POLL_INTERVAL_MS` (60 s), um ciclo calcula o corte (`agora - maxAgeMs`, 7 dias por
+padrão) e apaga até `OUTBOX_RETENTION_BATCH_SIZE` linhas (1000) com `published_at < corte`, na ordem
+de publicação, com `DELETE ... WHERE id IN (SELECT ... LIMIT ...)` numa transação curta. A deleção
+nunca toca eventos ainda não publicados (o filtro é `published_at IS NOT NULL`), então não interfere
+na entrega nem no retry; e, como o publisher só enxerga `published_at IS NULL`, apagar uma linha
+publicada é inofensivo. Várias instâncias podem rodar juntas: cada `DELETE` é uma transação própria e
+uma linha apagada por uma não volta para as outras. O índice parcial `outbox_published_idx` serve a
+busca por `published_at`; o lote cheio encadeia o próximo ciclo na hora.
 
 ## 12. Consumo por SQS
 
@@ -615,7 +628,12 @@ testes de integração criam filas próprias, com nomes aleatórios); mudá-las 
 cria. A aplicação não cria nem confere os atributos das filas: em produção elas vêm da
 infraestrutura e precisam repetir a configuração local — FIFO, deduplicação explícita
 (`ContentBasedDeduplication=false`), `VisibilityTimeout` de 60 s (acima do pior caso de ≈ 24,3 s
-do processamento, seção 9) e redrive para a DLQ FIFO com `maxReceiveCount` 10. O 10 vem do backoff:
+do processamento, seção 9) e redrive para a DLQ FIFO com `maxReceiveCount` 10. As filas de
+transações e de eventos usam o **FIFO de alta vazão** (`FifoThroughputLimit=perMessageQueueId` com
+`DeduplicationScope=messageGroup`): o teto passa de ~300 msg/s (3.000/s em lote) para até 9.000/s
+em lote, sem perder a ordem por grupo de mensagem (a wallet). A deduplicação por grupo é segura
+porque toda mensagem leva um `MessageDeduplicationId` único (`messageId` na entrada, `eventId` nos
+eventos); a DLQ permanece FIFO padrão. O `maxReceiveCount` 10 vem do backoff:
 somando as esperas (1 + 2 + … + 256 + 300 s, até ~13 min, menos com o jitter) e o tempo de cada
 tentativa, uma mensagem saudável aguenta uma falha transitória contínua (banco fora, por exemplo)
 da ordem de 10 min antes de ir para a DLQ; com 5, cerca de 30 s de falha já bastariam.
@@ -863,48 +881,66 @@ Docker. Três instâncias da aplicação com `mem_limit` de 256 MB, Postgres 17 
 (512 MB) no mesmo Compose. **O gerador de carga roda na mesma máquina e disputa CPU com o sistema
 testado**, e a rede é o loopback.
 
-**Resultados** (duas execuções de 60 s, seguidas, depois de um aquecimento de 20 s):
+**Resultados** (duas execuções de 60 s, seguidas, depois de um aquecimento de 20 s; a máquina com o
+navegador fechado, mas com o editor e o próprio gerador de carga ativos):
 
-|                                                                                         | Execução 1                       | Execução 2                       |
-| --------------------------------------------------------------------------------------- | -------------------------------- | -------------------------------- |
-| Requisições                                                                             | 17.329                           | 17.453                           |
-| Vazão                                                                                   | 288,1 req/s                      | 290,4 req/s                      |
-| Latência p50 / p95 / p99 / máx                                                          | 85,7 / 287,8 / 520,1 / 1469,3 ms | 82,9 / 292,5 / 566,8 / 1529,6 ms |
-| Wallets quentes p50 / p95 / p99                                                         | 150,4 / 467,4 / 695,6 ms         | 146,2 / 493,5 / 788,2 ms         |
-| Demais wallets p50 / p95 / p99                                                          | 72,1 / 154,3 / 194,4 ms          | 69,1 / 154,7 / 197,6 ms          |
-| Status                                                                                  | 16.818 × `201`, 511 × `422`      | 16.919 × `201`, 534 × `422`      |
-| Erros (`5xx` ou rede)                                                                   | 0                                | 0                                |
-| Replays detectados (`wagering_duplicates_total`)                                        | 1.603                            | 1.588                            |
-| Conflitos de lock / retries (`wagering_lock_conflicts_total`, `wagering_retries_total`) | 0 / 0                            | 0 / 0                            |
-| Tempo médio do caso de uso (servidor)                                                   | 102,5 ms                         | 101,7 ms                         |
-| Outbox: pico de pendentes / lag durante o tráfego                                       | 20.659 / 40 s                    | 20.441 / 39,4 s                  |
-| Tempo para a outbox esvaziar depois do tráfego                                          | 84,1 s                           | 82,4 s                           |
-| Wallets reconciliadas como consistentes                                                 | 200 de 200                       | 200 de 200                       |
-| Saldos negativos / saldo diferente do esperado                                          | 0 / 0                            | 0 / 0                            |
+|                                                                                         | Execução 1                        | Execução 2                        |
+| --------------------------------------------------------------------------------------- | --------------------------------- | --------------------------------- |
+| Requisições                                                                             | 15.748                            | 16.262                            |
+| Vazão                                                                                   | 262,0 req/s                       | 270,6 req/s                       |
+| Latência p50 / p95 / p99 / máx                                                          | 91,2 / 323,0 / 612,3 / 2.111,6 ms | 88,3 / 303,0 / 623,3 / 1.885,4 ms |
+| Wallets quentes p50 / p95 / p99                                                         | 157,1 / 534,0 / 850,3 ms          | 152,9 / 528,4 / 929,5 ms          |
+| Demais wallets p50 / p95 / p99                                                          | 77,1 / 173,5 / 232,6 ms           | 74,4 / 165,0 / 213,3 ms           |
+| Status                                                                                  | 15.256 × `201`, 492 × `422`       | 15.762 × `201`, 500 × `422`       |
+| Erros (`5xx` ou rede)                                                                   | 0                                 | 0                                 |
+| Replays detectados (`wagering_duplicates_total`)                                        | 1.350                             | 1.495                             |
+| Conflitos de lock / retries (`wagering_lock_conflicts_total`, `wagering_retries_total`) | 0 / 0                             | 0 / 0                             |
+| Tempo médio do caso de uso (servidor)                                                   | 112,2 ms                          | 108,7 ms                          |
+| Outbox: pico de pendentes / lag durante o tráfego                                       | 2.793 / 38,2 s                    | 2.687 / 37,8 s                    |
+| Tempo para a outbox esvaziar depois do tráfego                                          | 88,2 s                            | 89,1 s                            |
+| Wallets reconciliadas como consistentes                                                 | 200 de 200                        | 200 de 200                        |
+| Saldos negativos / saldo diferente do esperado                                          | 0 / 0                             | 0 / 0                             |
+
+Numa terceira execução, o backlog foi conferido direto no Postgres (`SELECT count(*) FROM
+outbox_messages WHERE published_at IS NULL`, uma amostra por segundo): o pico real foi **2.775**
+pendentes — coerente com o gauge — e a drenagem foi de 115 s, mostrando a variação do tempo de
+cauda (88 s, 89 s e 115 s nas três execuções).
 
 **Análise.**
-- **O gargalo observado é o publisher da outbox, e não o caminho HTTP.** Cada transação grava
-  aproximadamente dois eventos na outbox, o que dá em torno de 520 eventos/s de produção contra
-  uma publicação de 190 a 240 eventos/s somando as três instâncias (estimada pelo backlog: cerca
-  de 11 mil publicados durante os 60 s e 20 mil drenados em 83 s depois). O backlog cresce de forma
-  linear durante o tráfego, o lag chega a 40 s e só zera cerca de 80 s depois que o tráfego para.
-  Isso não perde nem duplica nada (a corretude passou), mas mostra que, nessa vazão, a
-  consistência eventual para os consumidores dos eventos fica atrasada em dezenas de segundos. A
-  causa provável é o publisher enviar um `SendMessage` por evento ao LocalStack, em lotes de 50
-  com uma wallet por vez em ordem; isso não foi perfilado, é uma hipótese.
-- **A CPU da máquina inteira satura.** Numa amostra do `docker stats` durante uma execução, cada
-  instância usava de 74% a 81% de um núcleo, o Postgres cerca de 200% (e 249 MiB dos 256 MiB do
-  limite) e o LocalStack 63%, fora o gerador de carga. Com gerador, banco e instâncias na mesma
-  máquina, não dá para separar quanto da latência é do sistema e quanto é do gerador.
-- **A disputa pelo lock de uma wallet aparece como latência, não como erro.** As 5 wallets
-  quentes têm p50 cerca de duas vezes o das demais e p99 três a quatro vezes maior, porque as
-  transações da mesma wallet se enfileiram no `SELECT … FOR UPDATE`. Nenhuma execução teve
-  nenhum conflito de lock (`lock_timeout`, deadlock ou serialização) nem retry: a espera coube
-  dentro do `lock_timeout`, e a correção do saldo não depende de sorte.
+- **O publisher deixou de acumular backlog.** Com o envio em lotes (`SendMessageBatch`) e os
+  pedaços em paralelo (`OUTBOX_PUBLISH_CONCURRENCY`), o backlog fica em ~2.700 durante o tráfego,
+  contra os ~20.700 de uma medição anterior em que o publisher mandava um `SendMessage` por evento:
+  cerca de 7× menos. Nessa vazão o publisher acompanha a produção (cerca de 450 eventos/s) e não
+  perde nada (a corretude passou).
+- **O que resta é a ordem estrita por wallet.** O claim só libera a cabeça (menor `wallet_version`
+  não publicada) de cada wallet, então uma wallet quente avança uma versão por ciclo. Durante o
+  tráfego isso é mascarado por haver muitas cabeças de wallets diferentes para publicar; depois que
+  o tráfego para, o que sobra está concentrado nas cadeias das 5 wallets quentes, e a cauda drena a
+  algumas dezenas de eventos/s (medido ~30–40/s, aproximadamente linear). É o custo consciente da
+  garantia de ordem (seção 11); quem precisa de saldo usa o `walletVersion` do payload como
+  referência.
+- **Vazão e latência do caminho HTTP ficaram estáveis.** ~266 req/s e p50 ~90 ms, sem erros, dentro
+  da variação desta máquina (gerador e sistema disputam CPU). A medição não permite atribuir ganho
+  nem perda ao caminho HTTP.
+- **A CPU da máquina inteira satura.** Com gerador, banco e instâncias na mesma máquina, não dá para
+  separar quanto da latência é do sistema e quanto é do gerador. Numa amostra do `docker stats`,
+  cada instância usava uma fração de núcleo, o Postgres se aproxima do teto de 256 MB e o LocalStack
+  também trabalha; a soma satura a máquina.
+- **A disputa pelo lock de uma wallet aparece como latência, não como erro.** As 5 wallets quentes
+  têm p50 cerca de duas vezes o das demais e p99 três a quatro vezes maior, porque as transações da
+  mesma wallet se enfileiram no `SELECT … FOR UPDATE`. Nenhuma execução teve conflito de lock
+  (`lock_timeout`, deadlock ou serialização) nem retry: a espera coube dentro do `lock_timeout`, e a
+  correção do saldo não depende de sorte.
 - **Pool de conexões: o teste não o isolou como gargalo.** Com 32 usuários virtuais para três
   instâncias de 10 conexões cada, não houve erro de pool, mas a aplicação não expõe métrica de
   espera por conexão, e o Postgres (CPU e memória) se esgota antes. Por isso a configuração do
   pool não mudou.
+
+**Comparação com medições anteriores.** A medição antiga (vazão ~290 req/s, backlog ~20.700,
+drenagem ~83 s) foi feita com um publisher diferente (um `SendMessage` por evento) e com outro
+estado da máquina; os números não são diretamente comparáveis. O que se pode afirmar é a direção:
+o backlog caiu uma ordem de grandeza e a cauda da outbox passou a ser limitada pela ordem por
+wallet, não pela vazão agregada de publicação.
 
 **O que os números não significam.** Não são a capacidade do sistema: são o que esta combinação
 (máquina de notebook, gerador de carga no mesmo hardware, banco com 256 MB, SQS emulado pelo
@@ -913,7 +949,9 @@ são sequenciais, então a vazão é limitada pela latência (carga em laço fec
 laço aberto, com taxa fixa, mediria melhor o ponto de saturação. O tráfego é sintético: 12%
 de replays, 3% de saldo insuficiente e 5 wallets quentes são escolhas do experimento, não
 um perfil real. A prova de corretude, ao contrário, não depende da máquina: vale para qualquer
-vazão.
+vazão. As filas já usam FIFO de alta vazão (seção 12), então o teto do SQS não é o limitante aqui;
+o LocalStack, de qualquer forma, não impõe os limites de vazão da AWS, então essa mudança não
+altera o resultado local — ela afasta o limite do serviço em produção.
 
 **Como reproduzir.** Ver "Teste de carga" no README.
 
@@ -942,6 +980,9 @@ aparece). Formato: decisão, alternativas consideradas e motivo.
 | Erros `5xx`, inclusive de `DomainError`, saem com mensagem genérica; o detalhe fica só no log        | ecoar a mensagem do erro                                                     | evita vazar detalhe interno ao cliente                                                                                                                                                                                               |
 | Falha de inicialização escrita como uma linha JSON (`level: fatal`) e saída com código 1             | deixar a promessa rejeitada sem tratamento                                   | o orquestrador enxerga a falha e o log não perde o motivo                                                                                                                                                                            |
 | Pool de conexões do MikroORM no padrão (2 a 10 por instância), sem variável nova                     | `DB_POOL_MAX` configurável                                                   | 200 requisições simultâneas passam sem erro; com N instâncias, N × 10 cabe em `max_connections = 100`; vira variável só se o teste de carga mostrar o pool como gargalo; o teste (seção 16) não o apontou, e o Postgres satura antes |
+| Publicação da outbox com concorrência limitada (`OUTBOX_PUBLISH_CONCURRENCY`, padrão 5)              | sequencial; todo o lote em paralelo                                          | sobrepõe a latência do `SendMessageBatch` (o gargalo medido) sem disparar o lote inteiro de uma vez; a ordem por wallet vem do claim (cabeça por wallet), não desta concorrência                                                     |
+| Idempotência numa leitura só (`findByIdempotency` devolve `byKey` e `byExternalId`)                  | duas consultas separadas                                                     | um round-trip a menos por transação; a chave tem precedência (uma linha que casa com os dois sai só em `byKey`), preservando a semântica anterior                                                                                    |
+| `lock_timeout` da wallet continua com `SET LOCAL`, não no nível da conexão                           | `lock_timeout` como parâmetro de startup da conexão                          | no nível da conexão o timeout vazaria para DDL que espera locks legitimamente (`TRUNCATE` nos testes, migrations), e o ganho de um round-trip por transação não paga esse risco                                                      |
 
 ### Schema
 
@@ -1025,7 +1066,9 @@ diz o que custaria e como entraria.
   da `BET` original, uma reversão pendente só estoura se um crédito grande entrar entre a `BET` e
   a resolução; esse caminho é coberto por teste unitário, não por integração, por depender dessa
   corrida.
-- As linhas publicadas da outbox nunca são removidas; falta um job de retenção.
+- As linhas publicadas da outbox são removidas pelo `OutboxRetentionWorker` (seção 11) depois de um
+  prazo configurável (`OUTBOX_RETENTION_MAX_AGE_MS`, 7 dias por padrão); enquanto o worker está
+  desligado ou o prazo não venceu, elas permanecem na tabela.
 - Um lote reservado é publicado em sequência por wallet; se o SQS ficar lento (no pior caso cerca
   de 2,5 s por envio: 1 s para abrir a conexão mais 1,5 s esperando a resposta) e uma wallet tiver
   muitos eventos no mesmo lote, o envio pode passar do lease e outra instância reservar as mesmas
@@ -1054,8 +1097,28 @@ diz o que custaria e como entraria.
 
 ## 19. Próximos passos
 
+**Performance (na ordem do gargalo atual):**
+- **A cauda da outbox para wallets quentes.** O backlog agregado caiu, mas depois do tráfego o que
+  sobra está concentrado nas cadeias das wallets quentes e drena uma versão por ciclo de claim
+  (seção 16). Candidatos: permitir um prefixo contíguo de versões por wallet no claim (mantendo a
+  ordem), ou aumentar a vazão de ciclos quando o lote vier incompleto; qualquer um precisa provar
+  que a ordem estrita continua garantida no banco.
+- **Medir o custo do SQS emulado (LocalStack) isoladamente**, para separar quanto da latência de
+  publicação é do serviço emulado e quanto é do banco/aplicação.
+- **Restam poucos round-trips no caminho HTTP** (cerca de uma dezena de instruções por transação).
+  Mover o `SET LOCAL lock_timeout` para o nível da conexão foi avaliado e rejeitado (a seção 17
+  explica o porquê); outras oportunidades, se o teste de carga as apontar.
+
+**Observabilidade e segurança:**
 - **Alertas** sobre as métricas já expostas (outbox lag crescendo, `wagering_dlq_messages_total`
   subindo, conflitos de lock) e um dashboard: hoje só há o endpoint de coleta.
 - **Usuário de banco só com DML** para a aplicação (`SELECT`, `INSERT`, `UPDATE`), sem `TRUNCATE`
   nem DDL; as migrations rodam com outro usuário.
-- **Retenção da outbox**: job que apaga as linhas já publicadas depois de um prazo.
+
+**Retenção de dados (prazo maior):**
+- **Crescimento do ledger e do journal.** São append-only por regra; a retenção da outbox já limita
+  a tabela de eventos, mas `wallet_ledger_entries` e `journal_entries` crescem sem limite.
+  Candidatos: particionamento por período ou arquivamento para armazenamento frio, preservando a
+  imutabilidade.
+- **Connection pooling sob pressão.** Medir a espera por conexão sob carga e dimensionar o pool
+  (hoje o padrão do MikroORM) contra o pico de concorrência.

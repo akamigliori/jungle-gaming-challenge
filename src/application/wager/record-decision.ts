@@ -1,4 +1,3 @@
-import type { IntegrationEvent } from '../../domain/events/integration-event';
 import { WagerTransactionPendingReference } from '../../domain/events/wager-transaction-pending-reference';
 import { WagerTransactionProcessed } from '../../domain/events/wager-transaction-processed';
 import { WagerTransactionRejected } from '../../domain/events/wager-transaction-rejected';
@@ -68,24 +67,30 @@ export async function recordDecision(
   }
 
   const context = () => ({ eventId: ids.next(), correlationId: p.correlationId, occurredAt: p.at });
-  const enqueue = (event: IntegrationEvent<unknown>, walletVersion?: number) =>
-    outbox.enqueue(OutboxMessage.enqueue(event, walletVersion));
+  const events: OutboxMessage[] = [];
   switch (decision.outcome) {
     case 'PROCESSED':
-      await enqueue(WagerTransactionProcessed.from(tx, context()));
+      events.push(OutboxMessage.enqueue(WagerTransactionProcessed.from(tx, context())));
       if (entry)
-        await enqueue(WalletBalanceChanged.from(wallet, entry, context()), entry.walletVersion);
+        events.push(
+          OutboxMessage.enqueue(
+            WalletBalanceChanged.from(wallet, entry, context()),
+            entry.walletVersion,
+          ),
+        );
       break;
     case 'REJECTED':
-      await enqueue(WagerTransactionRejected.from(tx, context()));
+      events.push(OutboxMessage.enqueue(WagerTransactionRejected.from(tx, context())));
       break;
     case 'PENDING_REFERENCE':
       // só a entrada em PENDING_REFERENCE vira evento; reagendar não, para não gerar ruído
       if (p.persist === 'insert') {
-        await enqueue(WagerTransactionPendingReference.from(tx, context()));
+        events.push(OutboxMessage.enqueue(WagerTransactionPendingReference.from(tx, context())));
       }
+      await outbox.enqueueMany(events);
       return;
   }
+  await outbox.enqueueMany(events);
 
   await transactions.wakeDependents({
     walletId: tx.walletId,

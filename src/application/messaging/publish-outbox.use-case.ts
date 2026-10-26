@@ -16,6 +16,8 @@ export interface PublishOutboxDeps {
   batchSize: number;
   /** Por quanto tempo a reserva de um lote impede outra instância de pegá-lo. */
   leaseMs: number;
+  /** Máximo de chamadas `SendMessageBatch` simultâneas num ciclo. */
+  concurrency: number;
   random?: () => number;
 }
 
@@ -37,11 +39,12 @@ export interface PublishOutboxResult {
 
 /**
  * Um ciclo do publisher da outbox: reserva um lote de eventos já confirmados no banco e publica
- * tudo em chamadas em lote de até `SEND_BATCH_MAX`, fora de qualquer transação, registrando o
- * resultado por entrada.
+ * tudo em chamadas em lote de até `SEND_BATCH_MAX`, fora de qualquer transação, marcando as
+ * publicadas numa única escrita no fim do ciclo. Os pedaços são enviados com concorrência limitada
+ * a `concurrency`, sobrepondo a latência do `SendMessageBatch` sem disparar todo o lote de uma vez.
  *
- * - Sucesso → `published_at`. Falha → nova tentativa com backoff (`scheduleRetry`); a ordem por
- *   wallet continua garantida pelo claim (cabeça por wallet), não por este código.
+ * - Sucesso → `published_at` (em lote). Falha → nova tentativa com backoff (`scheduleRetry`); a
+ *   ordem por wallet continua garantida pelo claim (cabeça por wallet), não por este código.
  * - Uma chamada em lote que nem chega a acontecer (rede) marca o lote inteiro como falho.
  * - Garantia at-least-once: se o processo morrer entre publicar e marcar, a mensagem é publicada
  *   de novo depois do lease, com o mesmo `eventId` (o consumidor deduplica por ele).
@@ -50,21 +53,53 @@ export class PublishOutboxUseCase {
   constructor(private readonly deps: PublishOutboxDeps) {}
 
   async runOnce(): Promise<PublishOutboxResult> {
-    const { outbox, clock, batchSize, leaseMs } = this.deps;
+    const { outbox, clock, batchSize, leaseMs, concurrency } = this.deps;
     const batch = await outbox.claimDue({ now: clock.now(), limit: batchSize, leaseMs });
 
-    const result: PublishOutboxResult = { published: 0, failed: 0, failures: [] };
+    const chunks: OutboxMessage[][] = [];
     for (let i = 0; i < batch.length; i += SEND_BATCH_MAX) {
-      const chunk = batch.slice(i, i + SEND_BATCH_MAX);
-      const { published, failures } = await this.publishChunk(chunk);
-      for (const id of published) {
-        await outbox.markPublished(id, clock.now());
-      }
-      result.published += published.length;
-      result.failed += failures.length;
-      result.failures.push(...failures);
+      chunks.push(batch.slice(i, i + SEND_BATCH_MAX));
+    }
+
+    const results = await this.publishInParallel(chunks, concurrency);
+
+    const result: PublishOutboxResult = { published: 0, failed: 0, failures: [] };
+    const publishedIds: string[] = [];
+    for (const chunk of results) {
+      publishedIds.push(...chunk.published);
+      result.published += chunk.published.length;
+      result.failed += chunk.failures.length;
+      result.failures.push(...chunk.failures);
+    }
+    if (publishedIds.length > 0) {
+      await outbox.markPublished(publishedIds, clock.now());
     }
     return result;
+  }
+
+  /**
+   * Envia os pedaços do lote com concorrência limitada a `concurrency`, preservando a ordem dos
+   * resultados (índice do pedaço). O limite capa o número de chamadas simultâneas quando o lote é
+   * grande, sem abrir mão de sobrepor a latência do `SendMessageBatch` — o gargalo medido.
+   */
+  private async publishInParallel(
+    chunks: OutboxMessage[][],
+    concurrency: number,
+  ): Promise<Array<{ published: string[]; failures: PublishFailure[] }>> {
+    const results = new Array<{ published: string[]; failures: PublishFailure[] }>(chunks.length);
+    let next = 0;
+    const workers = Array.from({ length: Math.min(concurrency, chunks.length) }, async () => {
+      for (;;) {
+        const index = next;
+        next += 1;
+        if (index >= chunks.length) return;
+        const chunk = chunks[index];
+        if (!chunk) return;
+        results[index] = await this.publishChunk(chunk);
+      }
+    });
+    await Promise.all(workers);
+    return results;
   }
 
   /**

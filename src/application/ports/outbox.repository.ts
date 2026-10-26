@@ -11,6 +11,9 @@ export interface OutboxRepository {
   /** Grava o evento na mesma transação da mudança que o originou. */
   enqueue(message: OutboxMessage): Promise<void>;
 
+  /** Grava vários eventos de uma vez, na mesma transação, com um único `INSERT`. */
+  enqueueMany(messages: readonly OutboxMessage[]): Promise<void>;
+
   /**
    * Em transação própria e curta, reserva até `limit` mensagens pendentes e vencidas (mais
    * antigas primeiro), ignorando as que outra instância está reservando, e empurra o
@@ -19,8 +22,8 @@ export interface OutboxRepository {
    */
   claimDue(params: ClaimDueParams): Promise<OutboxMessage[]>;
 
-  /** Marca como publicada; não faz nada se outra instância já marcou. */
-  markPublished(id: string, at: Date): Promise<void>;
+  /** Marca várias como publicadas numa escrita só; não faz nada com as que outra instância já marcou. */
+  markPublished(ids: readonly string[], at: Date): Promise<void>;
 
   /**
    * Registra uma tentativa que falhou: soma 1 em `attempts`, grava o `nextAttemptAt` da mensagem
@@ -29,6 +32,13 @@ export interface OutboxRepository {
    * altera nada.
    */
   reschedule(message: OutboxMessage, p: { error: string; claimedUntil: Date }): Promise<void>;
+
+  /**
+   * Apaga até `limit` eventos já publicados e com `published_at` anterior a `cutoff`, do mais
+   * antigo para o mais novo. Devolve quantos apagou. Apagar uma linha publicada não afeta a
+   * entrega (o publisher só enxerga `published_at IS NULL`).
+   */
+  deletePublishedOlderThan(cutoff: Date, limit: number): Promise<number>;
 }
 
 export const OUTBOX_REPOSITORY = Symbol('OUTBOX_REPOSITORY');

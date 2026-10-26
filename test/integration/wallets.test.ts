@@ -320,8 +320,8 @@ describe('POST /wallets', () => {
 
 describe('POST /wallets atomicity', () => {
   test('when the outbox insert fails, no wallet/tx/ledger row remains', async () => {
-    const failingOutbox: Pick<OutboxRepository, 'enqueue'> = {
-      enqueue: () => Promise.reject(new Error('outbox unavailable')),
+    const failingOutbox: Pick<OutboxRepository, 'enqueueMany'> = {
+      enqueueMany: () => Promise.reject(new Error('outbox unavailable')),
     };
     const broken = await createTestApp({}, (builder) =>
       builder.overrideProvider(OUTBOX_REPOSITORY).useValue(failingOutbox),

@@ -50,16 +50,22 @@ export async function createTestQueues(opts: {
   const { Attributes } = await sqs.send(
     new GetQueueAttributesCommand({ QueueUrl: dlqUrl, AttributeNames: ['QueueArn'] }),
   );
+  // FIFO de alta vazão (a deduplicação por grupo é segura: as mensagens usam dedup ids únicos)
+  const HIGH_THROUGHPUT_FIFO: Record<string, string> = {
+    FifoThroughputLimit: 'perMessageQueueId',
+    DeduplicationScope: 'messageGroup',
+  };
   const urls: Record<TestQueueName, string> = {
     transactionsDlq: dlqUrl,
     transactions: await createFifo(sqs, names.transactions, {
+      ...HIGH_THROUGHPUT_FIFO,
       VisibilityTimeout: String(opts.visibilityTimeout),
       RedrivePolicy: JSON.stringify({
         deadLetterTargetArn: Attributes?.QueueArn,
         maxReceiveCount: opts.maxReceiveCount,
       }),
     }),
-    events: await createFifo(sqs, names.events, {}),
+    events: await createFifo(sqs, names.events, HIGH_THROUGHPUT_FIFO),
   };
 
   return {
